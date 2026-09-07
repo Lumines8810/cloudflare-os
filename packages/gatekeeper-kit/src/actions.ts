@@ -181,8 +181,32 @@ export type ActionDefinition<Payload, Host> = {
 /** How a resolution ended, for cache invalidation. */
 export type ResolveOutcome = "applied" | "rejected" | "failed" | "reverted";
 
+/**
+ * Whether an action's payload still means anything under a different authority.
+ *
+ * - `"authority"` — pin it. `submit` requires a fence, and apply refuses a record whose authority
+ *   has since changed.
+ * - `"none"` — the action is authority-independent, so no fence is captured or checked.
+ *
+ * The kit never interprets the fence, so *which* authority it names is the provider's to choose.
+ * The common one is the connection generation from the `CredentialRead` the staging operation ran
+ * under: `CredentialCoordinator` rotates it on `connect()` and `clear()` only, never on refresh,
+ * so a same-account re-authorization trips the fence too. A provider that wants an action to
+ * survive re-authorization of the same account stores its own stable account id instead and passes
+ * that at apply — the comparison is opaque equality either way.
+ */
+export type FencePolicy = "authority" | "none";
+
 /** Cross-cutting policy for a whole action set, as opposed to one kind's behavior. */
-export type ActionSetOptions<Host> = {
+export type ActionSetOptions<Host, M> = {
+  /**
+   * The fence every kind takes unless `fenceOverrides` says otherwise. Required: a set that
+   * silently defaulted to unfenced is how an action approved under one provider account comes to
+   * be applied under the next one.
+   */
+  fence: FencePolicy;
+  /** Kinds whose fence differs from the set's, named one by one so each is a decision. */
+  fenceOverrides?: Partial<Record<keyof M, FencePolicy>>;
   /** Keeps applied records for revert or consumer-managed retention. */
   retainApplied?: boolean;
   /**
@@ -211,7 +235,11 @@ export type TaggedAction<M> = { [K in keyof M]: { kind: K; payload: M[K] } }[key
 export type ActionApplyContext = {
   /** The action-scoped git cache stub, for handlers that touch git. */
   gitCache?: RpcStub<GitCache>;
-  /** The account's current connection generation, from `CredentialSource.read()`. */
+  /**
+   * The current value of whatever authority the fence carries, compared by opaque equality. For
+   * the common connection fence that is `CredentialSource.read()`'s `generation`; for a provider
+   * fencing on a stable account id, it is that id. Required to apply an authority-fenced record.
+   */
   generation?: string;
 };
 
@@ -223,13 +251,11 @@ export type BoundActionSet<M extends Record<string, unknown>> = {
    * @param queue Approval queue capability.
    * @param kind Declared action kind.
    * @param payload Action payload.
-   * @param options `fence` pins the action to a connection generation, so apply refuses a record
-   * approved under a connection that has since been replaced. Capture it from the `CredentialRead`
-   * the staging operation ran under — structurally an `ActionFence`, so `{ fence: read }` works
-   * verbatim — never from a shared accessor a concurrent fetch can move. `CredentialCoordinator`
-   * rotates the generation on `connect()` and `clear()` only, never on refresh, so a same-account
-   * re-authorization mismatches too; fence the kinds whose payload means nothing under another
-   * connection and leave the rest unfenced.
+   * @param options `fence` is **required** for a kind the set declares `"authority"`, and refused
+   * for one declared `"none"`. For the common connection fence, pass the `CredentialRead` the
+   * staging operation itself ran under — structurally an `ActionFence`, so `{ fence: read }` works
+   * verbatim. Never a second read taken here, and never a shared accessor: either can move between
+   * the payload's read and this call, pinning old-connection data to the new connection.
    * @returns The allocated action ID.
    */
   submit<K extends keyof M>(
@@ -343,7 +369,7 @@ function strandedBy(
  */
 export function defineActions<Host, M extends Record<string, unknown>>(
   definitions: { [K in keyof M]: ActionDefinition<M[K], Host> },
-  options: ActionSetOptions<Host> = {},
+  options: ActionSetOptions<Host, M>,
 ): ActionSet<Host, M> {
   const labelByTag = new Map<string, string>();
   // One entry per tag: siblings sharing one are governed as a group, and the loop below rejects a
@@ -619,6 +645,18 @@ export function defineActions<Host, M extends Record<string, unknown>>(
       const set: BoundActionSet<M> = {
         submit: async (queue, kind, payload, { fence } = {}) => {
           const definition = definitions[kind];
+          const policy = options.fenceOverrides?.[kind] ?? options.fence;
+          // Declared, not inferred from what the call site happened to pass: an omitted fence on a
+          // connection-scoped kind is the silent failure this policy exists to prevent, and a
+          // fence on an authority-independent one would pin an action nothing needed pinned.
+          if (policy === "authority" && fence === undefined) {
+            throw new Error(`Action kind "${String(kind)}" is authority-fenced; stage it with the `
+              + "authority this operation ran under -- usually its `CredentialRead` -- as `fence`.");
+          }
+          if (policy === "none" && fence !== undefined) {
+            throw new Error(`Action kind "${String(kind)}" is declared authority-independent; `
+              + "remove the `fence`, or declare the kind \"authority\".");
+          }
           // Snapshotted before the first await: the payload must be the one describe rendered, the
           // fence the connection this call staged under.
           payload = structuredClone(payload);
