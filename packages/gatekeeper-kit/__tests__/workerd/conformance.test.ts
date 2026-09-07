@@ -64,17 +64,17 @@ describe("credentials and connect", () => {
   });
 
   it("refuses a completion whose connection was replaced while it exchanged", async () => {
-    // Two attempts race: the second reconnect lands before the first callback returns. Without the
-    // fence the older completion would silently overwrite the newer connection.
+    // The real race: the disconnect lands *inside* the token exchange, not before it. Checked
+    // before the exchange instead of after, this would pass while the window stayed open.
     const { account } = bind();
     await connect(account);
     const initiation = await account.beginConnect();
     const stale = await account.beginOAuth(initiation);
 
-    // A disconnect rotates the connection generation the stale attempt captured.
-    await account.disconnect();
-
-    expect(await account.completeConnect(stale!)).toBe(false);
+    // The revoke lands inside the exchange, not before it. Checked before the exchange instead of
+    // after, this would pass while the window stayed open.
+    expect(await account.completeConnect(stale!, true)).toBe(false);
+    expect(await account.isConnected()).toBe(false);
   });
 
   it("refuses a callback whose nonce a newer attempt replaced", async () => {
@@ -257,6 +257,21 @@ describe("assembly", () => {
     await expect(async () => { await resource.apply(staged); })
       .rejects.toThrow(/has since been replaced/);
     expect((await resource.record(staged))?.state).toBe("failed");
+  });
+
+  it("refuses a reconnect landing after apply's entry check but before the provider call", async () => {
+    // The entry check passes under connection A and the provider call would run under B. Only the
+    // handler comparing its own read against the fence closes this; nothing earlier can.
+    const { account, resource } = bind();
+    await connect(account);
+    await resource.bind(account);
+    const staged = await resource.submit("createProject",
+      { ref: "~raced", name: "Raced", spaceId: "space-1" });
+
+    await expect(async () => { await resource.apply(staged, true); })
+      .rejects.toThrow(/has since been replaced/);
+    // The provider was never called, so no project was created under the new connection.
+    expect([...provider.projects.values()].map(project => project.name)).not.toContain("Raced");
   });
 
   it("keeps two journals over one Durable Object from seeing each other", async () => {

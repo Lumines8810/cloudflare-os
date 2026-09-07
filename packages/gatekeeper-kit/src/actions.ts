@@ -81,9 +81,15 @@ export class ActionApplyError extends Error {}
 
 /**
  * Marks an apply failure as terminal with an **unknown** provider outcome: the call may already
- * have taken effect. The record is never replayed and never pruned, and no dependent is retired on
- * its account -- a reference it was to provide may in fact exist at the provider. It stays until
- * the user rejects it, so the reconciliation warning survives.
+ * have taken effect. The record is not pruned and no dependent is retired on its account -- a
+ * reference it was to provide may in fact exist at the provider -- so it stays until the user
+ * rejects it and the reconciliation warning survives.
+ *
+ * Pair it with `claimBeforeApply`. Non-replay rests on the durable claim taken *before* dispatch:
+ * without one the record is still `pending` when the handler throws, so an activation that dies
+ * between the provider call and this mark leaves it replayable, which is the effect the class
+ * exists to prevent. Thrown from an unclaimed definition it still records the outcome, and the kit
+ * logs that the guarantee was unavailable.
  *
  * This is the honest classification for a timeout, an aborted request, or any failure after the
  * provider was reached. Use `ActionApplyError` only when the effect is known absent.
@@ -586,6 +592,12 @@ export function defineActions<Host, M extends Record<string, unknown>>(
               strandDependents(id, action);
             } else if (error instanceof ActionOutcomeUnknownError) {
               journal.markFailed(id, error.message, { outcome: "unknown" });
+              if (!definition.claimBeforeApply) {
+                attributed.error("unknown outcome recorded without a pre-dispatch claim", {
+                  event: "actions.outcome.unclaimed",
+                  action: id,
+                });
+              }
             } else journal.restorePending(id);
             await resolved("failed");
             throw error;

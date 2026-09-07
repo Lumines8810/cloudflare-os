@@ -1510,6 +1510,44 @@ describe("defineActions", () => {
       .rejects.toThrow(/has since been replaced/);
     expect(journal.get(id)?.state).toBe("failed");
   });
+
+  it("records an unknown outcome from an unclaimed definition, and says the guarantee was not held",
+    async () => {
+      // Non-replay rests on the pre-dispatch claim. Without one the record is still pending when
+      // the handler throws, so a dying activation leaves it replayable -- record the outcome, but
+      // do not let the gap pass silently.
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { actions, journal } = bind({
+          claimBeforeApply: false,
+          apply: async () => { throw new ActionOutcomeUnknownError("the request timed out"); },
+        });
+        const id = await actions.submit(fakeQueue(), "execute", { sql: "one" });
+
+        await expect(actions.apply(id)).rejects.toThrow("the request timed out");
+
+        expect(journal.get(id)).toMatchObject({ state: "failed", outcome: "unknown" });
+        expect(logged).toHaveBeenCalled();
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+  it("stays quiet when the definition claimed before dispatch", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { actions } = bind({
+        claimBeforeApply: true,
+        apply: async () => { throw new ActionOutcomeUnknownError("the request timed out"); },
+      });
+      const id = await actions.submit(fakeQueue(), "execute", { sql: "one" });
+
+      await expect(actions.apply(id)).rejects.toThrow("the request timed out");
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
 });
 
 describe("dependent actions", () => {

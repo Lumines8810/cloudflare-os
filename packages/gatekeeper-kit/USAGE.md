@@ -441,6 +441,24 @@ return new TokenCursor<Project>({
 });
 ```
 
+A cursor is handed to the gadget and walked later, so it outlives the call that made it. Give it
+its own gate with `lease()` and release that from `dispose`, or the first `next()` after the
+session releases its stub fails on the authorization rather than the data:
+
+```ts
+const walk = this.#gate.lease();
+return new TokenCursor<Project>({
+  authorizePage: projects => walk.authorize(/* … */),
+  dispose: () => walk[Symbol.dispose](),
+  // …
+});
+```
+
+Both gates share the binding's strategy, so exclusions stay one decision; only the queue stub is
+duplicated, and either side can be released without disturbing the other. `lease()` needs a real
+`RpcStub` — the overseer hands one over, but a gate built from a service binding cannot duplicate
+it, since `dup` is reserved over RPC.
+
 Every page is authorized, including an empty one from a spent fetch window. So is the end of a walk
 that disclosed nothing: `searchUsers(email) → no matches` answers a question about provider data,
 and letting that reach the gadget unaudited turns the cursor into an existence oracle. A walk that

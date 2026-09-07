@@ -278,6 +278,20 @@ export class ObservationGate implements Disposable {
   }
 
   /**
+   * Opens a second gate over its own duplicate of the queue, for a capability that outlives the
+   * session that made it — a cursor handed to the gadget and walked later, most often.
+   *
+   * Both gates share this binding's strategy, so exclusions and fences stay one decision; only the
+   * queue stub is duplicated. The lease is **caller-owned**: release it when the capability it
+   * serves is released, typically from a cursor's `dispose`. Disposing the session gate does not
+   * disturb a lease, and disposing a lease does not disturb the session.
+   * @returns A gate the caller disposes independently.
+   */
+  lease(): ObservationGate {
+    return new ObservationGate(this.#queue.dup(), this.#strategy);
+  }
+
+  /**
    * Releases the duplicated approval-queue stub. Disposing during isolate shutdown trips a fatal
    * workerd assertion; shipped gatekeepers leave the release to RPC connection teardown.
    */
