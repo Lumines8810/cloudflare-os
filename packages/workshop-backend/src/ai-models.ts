@@ -164,6 +164,14 @@ function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsComp
   };
 }
 
+// pi 0.83's catalog predates GLM-5.3-Flash. Preserve image parts for this verified vision model
+// without assuming that arbitrary custom Workers AI models accept images. Prefer future catalog
+// metadata once available. https://developers.cloudflare.com/workers-ai/models/glm-5.3-flash/
+function workersAiInput(modelId: string, catalog: Model<Api> | undefined): Model<Api>["input"] {
+  return catalog?.input ?? (modelId === "@cf/zai-org/glm-5.3-flash"
+    ? ["text", "image"] : ["text"]);
+}
+
 // Build the pi model descriptor for reaching a provider's own native API through an AI Gateway
 // (the platform's or a user's). `gatewayUrl` is a gateway root -- over HTTPS
 // (https://gateway.ai.cloudflare.com/v1/{accountId}/{gateway}) or, for binding-routed requests,
@@ -238,7 +246,7 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         provider: "cloudflare-workers-ai",
         baseUrl: `${gatewayUrl}/workers-ai/v1`,
         reasoning: catalog?.reasoning ?? false,
-        input: catalog?.input ?? ["text"],
+        input: workersAiInput(config.model, catalog),
         cost: catalog?.cost ?? ZERO_COST,
         ...window,
         compat: workersAiCompat(catalog),
@@ -545,7 +553,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           provider: "cloudflare-workers-ai",
           baseUrl: `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/ai/v1`,
           reasoning: catalog?.reasoning ?? false,
-          input: catalog?.input ?? ["text"],
+          input: workersAiInput(config.model, catalog),
           cost: catalog?.cost ?? ZERO_COST,
           ...window,
           compat: workersAiCompat(catalog),

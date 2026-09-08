@@ -32,6 +32,57 @@ const WORKERS_AI_CONFIG: AiModelConfig = {
   apiToken: "ignored-in-gateway-mode",
 };
 
+describe("Workers AI image capabilities", () => {
+  beforeEach(() => { capturedRequests.length = 0; });
+
+  const config: AiModelConfig = {
+    provider: "cloudflare",
+    model: "@cf/zai-org/glm-5.3-flash",
+    apiToken: "test-token",
+    accountId: "test-account",
+  };
+
+  for (const route of ["binding", "platform", "user", "direct"] as const) {
+    it(`preserves GLM-5.3-Flash PNG bytes through the real SDK (${route})`, async () => {
+      const handle = getModel(env({
+        ...(route === "direct" ? { CF_AI_GATEWAY: undefined } : {}),
+        ...(route === "binding" ? {
+          CF_AI_GATEWAY_API_TOKEN: undefined,
+          CF_AI_GATEWAY_PROVIDERS: "cloudflare",
+          WORKERS_AI: { fetch: fetchStub } as unknown as Ai,
+        } : {}),
+      }), config, INITIATOR, route === "user" ? {
+        userGateway: { accountId: "user-account", apiKey: "user-token" },
+      } : {});
+      const stream = handle.stream(handle.model, {
+        messages: [{ role: "user", timestamp: 0, content: [
+          { type: "text", text: "Read this synthetic image; do not call tools." },
+          { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+        ] }],
+      }, { ...(route === "binding" ? {} : { fetch: fetchStub }), maxRetries: 0 });
+      expect((await stream.result()).stopReason).toBe("error");
+      expect(capturedRequests).toHaveLength(1);
+      const request = capturedRequests[0];
+      expect(JSON.parse(request.body).messages[0].content).toContainEqual({
+        type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" },
+      });
+      expect(request.body).not.toContain("image omitted");
+      expect(handle.model.input).toEqual(["text", "image"]);
+      if (route === "binding") {
+        expect(request.url).toBe(
+          "https://workers-binding.ai/ai-gateway/gateways/platform-gateway/workers-ai/v1/chat/completions");
+        expect(request.headers.get("cf-aig-authorization")).toBe("Bearer cloudflare-gateway-binding");
+      }
+    }, 15000);
+  }
+
+  it("does not grant image support to unknown or known text-only models", () => {
+    for (const model of ["@cf/example/unknown", WORKERS_AI_CONFIG.model]) {
+      expect(getModel(env(), { ...config, model }, INITIATOR).model.input).toEqual(["text"]);
+    }
+  });
+});
+
 function env(overrides: Partial<Cloudflare.Env> = {}): Cloudflare.Env {
   return {
     CF_AI_GATEWAY: "platform-gateway",
