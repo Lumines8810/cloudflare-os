@@ -1,4 +1,5 @@
 import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import type { AiRequestFailureKind } from "@gadgets/workshop-shared/limits";
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger } from "./observability";
@@ -2383,9 +2384,9 @@ export async function runAgent(
           content: "Create the context handoff now. Do not continue the conversation.",
           timestamp: Date.now(),
         });
-        // Like title generation, this call's usage is deliberately not billed to the chat. It
-        // carries the turn's largest prompt, so it needs the response cap most: without it a model
-        // that charges the response to the same window would reject the request outright.
+        // This is a separate guarded model request rather than a chat-log turn. It carries the
+        // turn's largest prompt, so it needs the response cap most: without it a model that charges
+        // the response to the same window would reject the request outright.
         let summary = (await completeText(handle, {
           systemPrompt: COMPACTION_SYSTEM_PROMPT,
           messages: summaryMessages,
@@ -2412,7 +2413,16 @@ export async function runAgent(
         // Compaction triggers below the limit, so the turn's own prompt still fits and a failed
         // summary must not fail the turn. Cancellation and an explicit `/compact` do surface.
         abortSignal.throwIfAborted();
-        if (compactionTurn) throw error;
+        if (compactionTurn ||
+            (error instanceof AgentTurnError &&
+             (error.kind === "budget-denied" || error.kind === "result-unknown" ||
+              error.kind === "rate-limit"))) {
+          // These outcomes are controlled by the central request guard. Running the main prompt
+          // after one of them would either bypass a budget denial or hide an uncertain provider
+          // result behind an automatic retry. Ordinary provider failures retain the historical
+          // automatic-compaction fallback below.
+          throw error;
+        }
         logger.warn("compaction failed; running the turn without it", {
           event: "agent.compaction.failed", chatId, error,
         });
@@ -2988,7 +2998,7 @@ export async function runAgent(
   // error triage after the loop settles. (pi never throws for provider failures; the loop
   // reports them as a final assistant message with stopReason "error"/"aborted".) Nothing from a
   // failed turn is persisted.
-  let turnFailure: {message: string} | undefined;
+  let turnFailure: {message: string; kind?: AiRequestFailureKind} | undefined;
 
   // Turn cap, replacing the old stepCountIs(30).
   let turnCount = 0;
@@ -3057,7 +3067,10 @@ export async function runAgent(
         if (message.stopReason === "error" || message.stopReason === "aborted") {
           // Persist nothing from a failed or cancelled model request; rethrown after the loop
           // returns.
-          turnFailure = {message: message.errorMessage ?? "The model request failed."};
+          turnFailure = {
+            message: message.errorMessage ?? "The model request failed.",
+            kind: handle.lastFailure?.kind,
+          };
           break;
         }
         // Note: a turn the model completed is persisted even if the user cancelled while its
@@ -3212,7 +3225,7 @@ export async function runAgent(
     // Other failures become an AgentTurnError carrying the failing request's HTTP status (when
     // it can be determined) for the overseer's triage.
     throw new AgentTurnError(
-        turnFailure.message, httpStatusFromError(turnFailure.message, handle));
+        turnFailure.message, httpStatusFromError(turnFailure.message, handle), turnFailure.kind);
   }
 
   // The turn ran, so there is no checkpoint to report.

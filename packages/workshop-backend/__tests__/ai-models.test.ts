@@ -1,6 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
+import {
+  AiRequestGuardError,
+  type AiRequestGuard,
+} from "../src/ai-gateway-billing/limits/ai-budget.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
 // the returned handle's model descriptor (baseUrl/id/api) and log route, and request-level
@@ -276,6 +280,66 @@ describe("getModel AI Gateway routing", () => {
     expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
     // Session affinity flows through (Workers AI models opt in to the affinity headers).
     expect(request.headers.get("x-session-affinity")).toBe("session-a");
+  }, 15000);
+});
+
+describe("guarded model requests", () => {
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+
+  it("denies before constructing a provider request", async () => {
+    let fetchCalls = 0;
+    const guard: AiRequestGuard = {
+      reserve: async () => {
+        throw new AiRequestGuardError("budget-denied", "daily budget exhausted");
+      },
+      settle: async () => {},
+    };
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {aiRequestGuard: guard});
+
+    const stream = handle.stream(handle.model, {
+      messages: [{role: "user", content: "hello", timestamp: 0}],
+    }, {fetch: async () => {
+      fetchCalls++;
+      return new Response(null, {status: 500});
+    }});
+    const message = await stream.result();
+
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toBe("daily budget exhausted");
+    expect(fetchCalls).toBe(0);
+    expect(handle.lastFailure).toEqual({kind: "budget-denied"});
+  });
+
+  it("disables provider retries and settles a 429 as a rate limit", async () => {
+    const settled: string[] = [];
+    const guard: AiRequestGuard = {
+      reserve: vi.fn(async () => ({reservationId: "reservation-1"})),
+      settle: vi.fn(async (_id, outcome) => { settled.push(outcome); }),
+    };
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      capturedRequests.push({
+        url: request.url,
+        headers: request.headers,
+        body: await request.text(),
+      });
+      return Response.json(
+          {error: {type: "rate_limit_error", message: "try later"}}, {status: 429});
+    });
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {aiRequestGuard: guard});
+
+    const stream = handle.stream(handle.model, {
+      messages: [{role: "user", content: "hello", timestamp: 0}],
+    }, {fetch: fetchSpy});
+    const message = await stream.result();
+
+    expect(message.stopReason).toBe("error");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(guard.reserve).toHaveBeenCalledTimes(1);
+    expect(settled).toEqual(["rate-limit"]);
+    expect(handle.lastFailure?.kind).toBe("rate-limit");
   }, 15000);
 });
 

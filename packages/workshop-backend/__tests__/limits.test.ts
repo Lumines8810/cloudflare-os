@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   canProceedWithRequest,
   hasMinimumBalance,
   MINIMUM_CLOUDFLARE_BALANCE,
 } from "@gadgets/workshop-shared/limits";
+import { checkUsageAndBalance } from "../src/ai-gateway-billing/limits/usage-checker.js";
+import type { UserDurableObject } from "../src/user.js";
 
 describe("hasMinimumBalance", () => {
   it("rejects null/undefined balances", () => {
@@ -74,5 +76,35 @@ describe("canProceedWithRequest", () => {
     });
     expect(r.allowed).toBe(true);
     expect(r.shouldUseByok).toBe(true);
+  });
+});
+
+describe("checkUsageAndBalance", () => {
+  it("does not consume a quota slot during the preflight read", async () => {
+    const checkDailyLlmCount = vi.fn(async () => ({
+      withinLimits: true,
+      remaining: 3,
+      limit: 4,
+      used: 1,
+      resetAt: "2026-09-11T00:00:00.000Z",
+    }));
+    const consumeDailyLlmCall = vi.fn(async () => {
+      throw new Error("preflight must not consume");
+    });
+    const userStub = {
+      checkDailyLlmCount,
+      consumeDailyLlmCall,
+      getCloudflareGatekeeperAccount: async () => null,
+    } as unknown as DurableObjectStub<UserDurableObject>;
+
+    const result = await checkUsageAndBalance({
+      ENABLE_CLOUDFLARE_LIMITS: "true",
+      DAILY_LLM_CALL_LIMIT: "4",
+    } as Cloudflare.Env, userStub);
+
+    expect(result.allowed).toBe(true);
+    expect(result.remaining).toBe(3);
+    expect(checkDailyLlmCount).toHaveBeenCalledWith(4);
+    expect(consumeDailyLlmCall).not.toHaveBeenCalled();
   });
 });

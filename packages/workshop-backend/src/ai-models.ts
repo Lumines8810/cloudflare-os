@@ -1,8 +1,20 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import type {
-  AnthropicMessagesCompat, Api, AssistantMessageEventStream, Context, FetchFunction, Model,
-  ModelCost, OpenAICompletionsCompat, ProviderHeaders, SimpleStreamOptions, StreamFunction,
+import {
+  createAssistantMessageEventStream,
+  type AnthropicMessagesCompat,
+  type Api,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type AssistantMessageEventStream,
+  type Context,
+  type FetchFunction,
+  type Model,
+  type ModelCost,
+  type OpenAICompletionsCompat,
+  type ProviderHeaders,
+  type SimpleStreamOptions,
+  type StreamFunction,
 } from "@earendil-works/pi-ai";
 import { stream as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as googleGenerativeAiStream } from "@earendil-works/pi-ai/api/google-generative-ai";
@@ -18,8 +30,14 @@ import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
   from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
-import { completeText } from "./ai-invoke.js";
+import { completeText, zeroUsage } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
+import type { AiRequestFailureKind, AiRequestOutcome } from "@gadgets/workshop-shared/limits";
+import {
+  AiRequestGuardError,
+  createApprovalQueueAiRequestGuard,
+  type AiRequestGuard,
+} from "./ai-gateway-billing/limits/ai-budget.js";
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -49,10 +67,12 @@ type GatewayMetadataContext = {
   chatId?: number;
 };
 
-type ModelRoutingOptions = {
+export type ModelRoutingOptions = {
   sessionAffinity?: string;
   userGateway?: UserGatewayRouting;
   metadata?: GatewayMetadataContext;
+  /** Meter platform-funded requests immediately before provider I/O. */
+  aiRequestGuard?: AiRequestGuard;
 };
 
 /**
@@ -101,6 +121,9 @@ export type ModelHandle = {
    * is safe.
    */
   lastResponse?: { status: number; aiGatewayLogId?: string };
+
+  /** Classification of the most recent guarded failure, cleared at each new request. */
+  lastFailure?: { kind: AiRequestFailureKind; statusCode?: number };
 };
 
 function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
@@ -282,7 +305,128 @@ type HandleArgs = {
   // gateway over env.WORKERS_AI.fetch() instead of the global fetch (see bindingFetch).
   // A per-call options.fetch still wins, which tests rely on to capture requests.
   fetch?: FetchFunction;
+  /** Optional platform quota guard; absent for BYOK and unlimited deployments. */
+  aiRequestGuard?: AiRequestGuard;
 };
+
+function errorStatusFromMessage(message: string): number | undefined {
+  let match = /^(\d{3})\b/.exec(message.trim());
+  return match ? Number(match[1]) : undefined;
+}
+
+function classifyProviderFailure(
+    message: AssistantMessage, handle: ModelHandle, signal?: AbortSignal): AiRequestFailureKind {
+  if (signal?.aborted || message.stopReason === "aborted") return "aborted";
+  let status = handle.lastResponse?.status ?? errorStatusFromMessage(message.errorMessage ?? "");
+  if (status === 429) return "rate-limit";
+  if (status === 400 || status === 413 || status === 422) return "input-invalid";
+  if (status !== undefined) return "provider";
+  return "result-unknown";
+}
+
+function syntheticFailureEvent(
+    model: Model<Api>, stopReason: "error" | "aborted", errorMessage: string): AssistantMessageEvent {
+  let error: AssistantMessage = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: zeroUsage(),
+    stopReason,
+    errorMessage,
+    timestamp: Date.now(),
+  };
+  return {type: "error", reason: stopReason, error};
+}
+
+function errorMessageFromUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : `${error}`;
+}
+
+async function pipeGuardedStream(
+    outer: AssistantMessageEventStream,
+    handle: ModelHandle,
+    model: Model<Api>,
+    context: Context,
+    options: SimpleStreamOptions,
+    streamFn: StreamFunction<Api, SimpleStreamOptions>,
+    guard: AiRequestGuard,
+): Promise<void> {
+  let lease: {reservationId: string} | undefined;
+  let safeSettle = async (outcome: AiRequestOutcome) => {
+    if (!lease) return;
+    try {
+      await guard.settle(lease.reservationId, outcome);
+    } catch {
+      // A custom guard may fail after the provider result is known. Keep the result visible; the
+      // built-in guard itself retries and remains conservative on settlement failures.
+    }
+  };
+  let pushFailure = async (
+      kind: AiRequestFailureKind, message: string, statusCode?: number): Promise<void> => {
+    handle.lastFailure = {kind, ...(statusCode === undefined ? {} : {statusCode})};
+    await safeSettle(kind);
+    outer.push(syntheticFailureEvent(
+        model, kind === "aborted" ? "aborted" : "error", message));
+  };
+
+  try {
+    options.signal?.throwIfAborted();
+    lease = await guard.reserve();
+  } catch (error) {
+    let kind: AiRequestFailureKind = options.signal?.aborted ? "aborted"
+        : error instanceof AiRequestGuardError ? error.kind : "result-unknown";
+    await pushFailure(kind, errorMessageFromUnknown(error));
+    return;
+  }
+
+  try {
+    // Reservation is the retry boundary: a provider SDK retry would be a second billable request
+    // hidden behind one reservation, so guarded calls always disable SDK retries.
+    let inner = streamFn(model, context, {...options, maxRetries: 0});
+    let finalEvent: Extract<AssistantMessageEvent, {type: "done" | "error"}> | undefined;
+    for await (let event of inner) {
+      if (event.type === "done" || event.type === "error") {
+        finalEvent = event;
+        break;
+      }
+      outer.push(event);
+    }
+
+    if (!finalEvent) {
+      await pushFailure(
+          "result-unknown",
+          "The model provider ended without a final result. The request remains counted; retry later.");
+      return;
+    }
+
+    if (finalEvent.type === "done") {
+      handle.lastFailure = undefined;
+      await safeSettle("success");
+      outer.push(finalEvent);
+      return;
+    }
+
+    let failureKind = classifyProviderFailure(finalEvent.error, handle, options.signal);
+    let statusCode = handle.lastResponse?.status ??
+        errorStatusFromMessage(finalEvent.error.errorMessage ?? "");
+    handle.lastFailure = {
+      kind: failureKind,
+      ...(statusCode === undefined ? {} : {statusCode}),
+    };
+    await safeSettle(failureKind);
+    outer.push(finalEvent);
+  } catch (error) {
+    let statusCode = handle.lastResponse?.status ??
+        errorStatusFromMessage(errorMessageFromUnknown(error));
+    let kind: AiRequestFailureKind = options.signal?.aborted ? "aborted"
+        : statusCode === 429 ? "rate-limit"
+        : statusCode === 400 || statusCode === 413 || statusCode === 422 ? "input-invalid"
+        : statusCode === undefined ? "result-unknown" : "provider";
+    await pushFailure(kind, errorMessageFromUnknown(error), statusCode);
+  }
+}
 
 function makeHandle(args: HandleArgs): ModelHandle {
   const streamFn = API_STREAMS[args.model.api];
@@ -313,6 +457,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
     stream: (model, context, { thinking = true, ...options } = {}) => {
       // Never let a failed request read a previous request's response metadata.
       handle.lastResponse = undefined;
+      handle.lastFailure = undefined;
       const headers: ProviderHeaders = {
         ...args.headers,
         ...options.headers,
@@ -349,7 +494,17 @@ function makeHandle(args: HandleArgs): ModelHandle {
           return bridgePdfAttachments(args.model.api, replaced ?? payload) ?? replaced;
         },
       };
-      return streamFn(model, context, merged);
+      if (!args.aiRequestGuard) {
+        return streamFn(model, context, merged);
+      }
+
+      // Keep the public ModelHandle.stream contract synchronous for pi-agent-core and existing
+      // callers, while the outer event stream performs the async reservation before constructing
+      // the provider stream.
+      let outer = createAssistantMessageEventStream();
+      void pipeGuardedStream(
+          outer, handle, model, context, merged, streamFn, args.aiRequestGuard);
+      return outer;
     },
   };
   return handle;
@@ -380,7 +535,7 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
     return getModelViaGateway(gwConfig, config, initiator, options);
   }
 
-  return getModelDirect(config, options.sessionAffinity);
+  return getModelDirect(config, options.sessionAffinity, options.aiRequestGuard);
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -508,12 +663,14 @@ function getModelViaGateway(
     ...(binding ? { fetch: bindingFetch(binding) } : {}),
     gatewayMetadata: metadata,
     sessionAffinity: options.sessionAffinity,
+    aiRequestGuard: options.aiRequestGuard,
     aiGatewayLogRoute: logRoute(gateway),
   });
 }
 
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
-function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
+function getModelDirect(
+    config: AiModelConfig, sessionAffinity?: string, aiRequestGuard?: AiRequestGuard): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
@@ -535,6 +692,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         },
         apiKey: config.apiToken,
         sessionAffinity,
+        aiRequestGuard,
       });
     case "cloudflare": {
       // Workers AI is fetch-only (no Workers-binding transport), so outside AI Gateway mode it's
@@ -560,6 +718,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         },
         apiKey: config.apiToken,
         sessionAffinity,
+        aiRequestGuard,
       });
     }
     case "google":
@@ -578,6 +737,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         },
         apiKey: config.apiToken,
         sessionAffinity,
+        aiRequestGuard,
       });
     case "ollama":
       // `apiUrl` is the Ollama server base; its OpenAI-compat endpoint lives under /v1. Accept
@@ -628,6 +788,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
             ? { apiKey: "unused", headers: { Authorization: null } }
             : { apiKey: config.apiToken }),
         sessionAffinity,
+        aiRequestGuard,
       });
     case "openai":
       return makeHandle({
@@ -646,6 +807,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         },
         apiKey: config.apiToken,
         sessionAffinity,
+        aiRequestGuard,
       });
     default:
       config.provider satisfies never;
@@ -692,8 +854,10 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
+    let aiRequestGuard = createApprovalQueueAiRequestGuard(this.env, approvalQueue);
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
+      aiRequestGuard,
     });
     return new LanguageModelBindingImpl(model);
   }

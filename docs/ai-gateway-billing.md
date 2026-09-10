@@ -7,15 +7,22 @@ out, bills further usage to the user's **own Cloudflare AI Gateway credits**. Of
 ## How it works
 
 Each user gets a free allowance of LLM calls per UTC day (default 100), counted on the user's own
-`UserDurableObject` (`consumeDailyLlmCall` / `checkDailyLlmCount`). Before each user-initiated agent
-turn, the overseer calls `checkUsageAndBalance`:
+`UserDurableObject`. `checkUsageAndBalance` is a read-only preflight. The actual platform-funded
+request is atomically reserved by `reserveAiRequest()` immediately before provider I/O, then settled
+with a stable outcome (`success`, `rate-limit`, `provider`, `result-unknown`, `input-invalid`, or
+`aborted`). Lost reserve/settle RPC responses are retried idempotently; quota is never released for
+an uncertain provider result.
+
+Before each user-initiated agent turn, the overseer calls `checkUsageAndBalance`:
 
 - **Connected, balance ≥ `$2`** → allowed, routed through the user's own account so usage bills
   their Cloudflare credits — even while free-tier allowance remains. The platform is never charged
   for funded users, and their daily free-tier counter is left untouched.
 - **Otherwise, within the free tier** → allowed, served via the platform's configured AI Gateway
   (all providers, Workers AI included). This includes connected users whose balance is below `$2`
-  (incl. $0).
+  (incl. $0). Each model step, automatic compaction, callback continuation, title/name helper, and
+  model-binding call uses the same pre-execution reservation guard; provider SDK retries are disabled
+  for guarded calls so one reservation cannot hide multiple provider requests.
 - **Free tier exhausted, no Cloudflare account connected** → blocked, with a prompt to connect.
 - **Free tier exhausted, connected but balance below `$2`** → blocked, with a prompt to add credits.
 
@@ -90,7 +97,9 @@ MINIMUM_CLOUDFLARE_BALANCE=2    # min connected-account balance (USD) to proceed
 
 ## Storage / bindings
 
-The free-tier daily LLM-call counter lives on each `UserDurableObject` (no separate binding).
+The free-tier daily LLM-call counter and bounded reservation/idempotency records live on each
+`UserDurableObject` (no separate binding). Reservations are retained briefly for settlement and
+pruned to a fixed bound; denied requests do not increment the counter.
 
 The OAuth tokens live in the connected Cloudflare *gatekeeper* account. Each `UserDurableObject`
 stores only lightweight billing state (the selected account id + a cached credit balance, plus the
@@ -105,7 +114,8 @@ ai-gateway-billing/
 ├── config.ts                     # ENABLE_CLOUDFLARE_LIMITS / minimum-balance readers
 ├── limits/
 │   ├── config.ts                 # daily-limit + calendar-day helpers + DailyQuotaResult
-│   └── usage-checker.ts          # checkUsageAndBalance / getUsageInfo (counter lives on UserDurableObject)
+│   ├── ai-budget.ts               # idempotent reservation guard + outcome classification bridge
+│   └── usage-checker.ts           # read-only checkUsageAndBalance / getUsageInfo
 └── cloudflare/
     ├── account-service.ts        # CF REST: accounts / balance
     └── connection-service.ts     # token (from CF gatekeeper), account selection, balance cache, BYOK routing

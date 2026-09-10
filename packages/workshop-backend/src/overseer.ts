@@ -12,6 +12,8 @@ import {
   LanguageModelGatekeeperProps,
   getModel,
   UserGatewayRouting,
+  type ModelHandle,
+  type ModelRoutingOptions,
 } from "./ai-models";
 import { AgentTurnError, completeText } from "./ai-invoke";
 import {
@@ -32,6 +34,8 @@ import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/backend-utils/error-reporting";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
+import { createUserAiRequestGuard, type AiRequestGuard } from
+    "./ai-gateway-billing/limits/ai-budget";
 import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
@@ -4089,13 +4093,15 @@ class OverseerImpl implements AgentHooks {
       // wants it.
       await this.reconcilePendingGadgets(chatId);
 
-      // Enforce the optional free-tier usage limit before starting a user-initiated turn. Callback-
-      // initiated continuations are exempt so outstanding callbacks are never stranded mid-flow.
-      // When the Cloudflare limits flow is disabled, checkUsageAndBalance() always allows.
+      // Read the optional free-tier usage limit before starting a turn. This is a preflight only;
+      // the selected ModelHandle reserves one slot immediately before every provider request,
+      // including follow-up tool turns and callback continuations. When the Cloudflare limits flow
+      // is disabled, checkUsageAndBalance() always allows and no guard is attached.
       // (This runs inside the try so the `finally` below still clears the active-agent state and
       // emits a stream "clear" — otherwise the UI would spin forever on a block.)
       let byokRouting: UserGatewayRouting | undefined;
-      if (!callbackInitiated && this.ownerId) {
+      let aiRequestGuard: AiRequestGuard | undefined;
+      if (this.ownerId) {
         let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
         let usage = await checkUsageAndBalance(this.env, ownerStub);
         if (!usage.allowed) {
@@ -4110,9 +4116,11 @@ class OverseerImpl implements AgentHooks {
         // Free tier exhausted but the user can continue via their own Cloudflare gateway: route
         // inference through it so the usage bills their account. checkUsageAndBalance already
         // resolved the routing (reusing its connection lookup), so we don't decrypt the token again.
-        if (usage.shouldUseByok) {
+        if (usage.shouldUseByok && usage.byokRouting) {
           byokRouting = usage.byokRouting;
-          if (byokRouting) byokOwnerStub = ownerStub;
+          byokOwnerStub = ownerStub;
+        } else {
+          aiRequestGuard = createUserAiRequestGuard(this.env, ownerStub);
         }
       }
 
@@ -4121,6 +4129,7 @@ class OverseerImpl implements AgentHooks {
           this.env, aiModel.config, initiator, {
             sessionAffinity,
             userGateway: byokRouting,
+            aiRequestGuard,
             metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
           });
 
@@ -4206,10 +4215,14 @@ class OverseerImpl implements AgentHooks {
       // one was observed.
       let apiError = err instanceof AgentTurnError ? err : null;
 
-      // Report unexpected failures for triage. Skip expected provider 4xx (auth,
-      // rate limit, quota/billing), which are ordinary control flow, not incidents.
+      // Report unexpected failures for triage. Guard-controlled denials, rate limits, malformed
+      // inputs, and user cancellations are ordinary control flow; result-unknown remains reportable
+      // because it needs operational investigation rather than an automatic retry.
       const apiStatus = apiError?.statusCode;
-      if (apiStatus === undefined || apiStatus >= 500) {
+      const suppressReport = apiError?.kind === "budget-denied" ||
+          apiError?.kind === "rate-limit" || apiError?.kind === "input-invalid" ||
+          apiError?.kind === "aborted";
+      if (!suppressReport && (apiStatus === undefined || apiStatus >= 500)) {
         reportIssue("overseer.run-agent", err, {
           attributes: obsContext.get(),
           http: apiStatus === undefined
@@ -4233,7 +4246,9 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
 
-      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      this.postAgentErrorMessage(
+          chatId, aiModel.profile, errorMessage,
+          apiError?.kind === "budget-denied" ? "usage_limit" : undefined);
 
       // Reject any pending agent callback return promises.
       let error = err instanceof Error ? err : new Error(`${err}`);
@@ -4515,6 +4530,39 @@ class OverseerImpl implements AgentHooks {
     return this.users.get(this.users.idFromString(this.ownerId));
   }
 
+  // Auxiliary model calls (titles, binding names, and compaction through the main handle) use the
+  // same billing decision as the interactive turn. The quota read is only a preflight; the guard
+  // attached to the returned handle performs the atomic reservation immediately before provider I/O.
+  async #getAuxiliaryModel(
+      config: AiModelConfig,
+      initiator: AiChatAuthorInfo,
+      options: Pick<ModelRoutingOptions, "metadata"> = {}): Promise<ModelHandle | undefined> {
+    if (!this.ownerId) return getModel(this.env, config, initiator, options);
+
+    let ownerStub = this.#ownerUserDo();
+    let usage = await checkUsageAndBalance(this.env, ownerStub);
+    if (!usage.allowed) return undefined;
+    let userGateway = usage.shouldUseByok ? usage.byokRouting : undefined;
+    let aiRequestGuard = userGateway
+        ? undefined
+        : createUserAiRequestGuard(this.env, ownerStub);
+    return getModel(this.env, config, initiator, {
+      ...options,
+      userGateway,
+      aiRequestGuard,
+    });
+  }
+
+  /** Reserve a model-binding request against the workspace owner's user quota. */
+  reserveAiRequest(reservationId: string) {
+    return this.#ownerUserDo().reserveAiRequest(reservationId);
+  }
+
+  /** Settle a model-binding request against the workspace owner's user quota. */
+  settleAiRequest(reservationId: string, outcome: Parameters<UserDurableObject["settleAiRequest"]>[1]) {
+    return this.#ownerUserDo().settleAiRequest(reservationId, outcome);
+  }
+
   // Ensure every singleton account the gadget owner has (e.g. the Context Library) is provisioned
   // for this gadget as an ambient gatekeeper record, folded into each chat's env (named by the
   // gatekeeper's suggested binding name; see prepareChatBindings) so the agent can read it in
@@ -4674,7 +4722,8 @@ class OverseerImpl implements AgentHooks {
       subject: string, takenNames: Set<string>,
       quick: {config: AiModelConfig, initiator: AiChatAuthorInfo}): Promise<string | undefined> {
     try {
-      let model = getModel(this.env, quick.config, quick.initiator);
+      let model = await this.#getAuxiliaryModel(quick.config, quick.initiator);
+      if (!model) return undefined;
       let result = await completeText(model, {
         signal: AbortSignal.timeout(10_000),
         prompt:
@@ -5345,9 +5394,10 @@ class OverseerImpl implements AgentHooks {
                             modelConfig: AiModelConfig,
                             initiator: AiChatAuthorInfo): Promise<void> {
     try {
-      let model = getModel(this.env, modelConfig, initiator, {
+      let model = await this.#getAuxiliaryModel(modelConfig, initiator, {
         metadata: { source: "thread-title", gadgetId: this.ctx.id.toString(), chatId },
       });
+      if (!model) return;
 
       let result = await completeText(model, {
         // TODO: Is there a better way to convince the LLM just to summarize and not to follow
@@ -5402,9 +5452,10 @@ class OverseerImpl implements AgentHooks {
         }
       }
 
-      let model = getModel(this.env, modelConfig, initiator, {
+      let model = await this.#getAuxiliaryModel(modelConfig, initiator, {
         metadata: { source: "gadget-title", gadgetId: this.ctx.id.toString(), chatId },
       });
+      if (!model) return;
 
       let gadgetTitle = await completeText(model, {
         prompt: "Below is the log of a chat session that led to a coding agent writing " +
@@ -9700,6 +9751,16 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
 
   authorizeObservation(description: ObservationDescription): Promise<void> {
     return this.impl.authorizeObservation(this.gatekeeperId, description, this.caller);
+  }
+
+  reserveAiRequest(reservationId: string) {
+    return this.impl.reserveAiRequest(reservationId);
+  }
+
+  settleAiRequest(
+      reservationId: string,
+      outcome: Parameters<UserDurableObject["settleAiRequest"]>[1]) {
+    return this.impl.settleAiRequest(reservationId, outcome);
   }
 
   submitAction(action: number, description: ActionDescription): Promise<void> {

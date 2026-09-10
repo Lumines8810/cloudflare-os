@@ -5,7 +5,8 @@
 //   - Connected + balance >= minimum -> billed to the user's own gateway, no daily cap; the daily
 //     counter is NOT consumed (the platform free tier is reserved for everyone else).
 //   - Connected + balance below minimum (incl. $0), or not connected -> platform free tier; the
-//     daily counter is consumed and, once exhausted, the request is blocked.
+//     daily counter is reserved immediately before each actual model request and, once exhausted,
+//     the request is blocked.
 
 import { canProceedWithRequest, hasMinimumBalance, LimitWindowKind } from "@gadgets/workshop-shared/limits";
 import { CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
@@ -59,7 +60,8 @@ function unlimitedResult(): UsageCheckResult {
  *
  * When limits are disabled, always allows without touching the user object. Otherwise: connected +
  * funded users bill their own gateway and skip the daily counter entirely; everyone else draws on
- * the platform free tier (consuming one call against the user object) until it's exhausted.
+ * the platform free tier. The actual counter reservation is performed by the model handle after
+ * this read-only preflight, so failed setup work and concurrent preflights cannot consume quota.
  */
 export async function checkUsageAndBalance(
   env: Cloudflare.Env,
@@ -101,9 +103,9 @@ export async function checkUsageAndBalance(
     };
   }
 
-  // Otherwise draw on the platform free tier. consumeDailyLlmCall() only increments while within
-  // the limit (it no-ops once `used >= limit`), so a blocked request never counts.
-  const quota = await userStub.consumeDailyLlmCall(limit);
+  // Otherwise draw on the platform free tier. This is deliberately a read-only preflight; the
+  // ModelHandle's central guard atomically reserves the slot immediately before provider I/O.
+  const quota = await userStub.checkDailyLlmCount(limit);
 
   const decision = canProceedWithRequest({
     withinLimits: quota.withinLimits,
