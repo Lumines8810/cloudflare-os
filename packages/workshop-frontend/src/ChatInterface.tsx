@@ -231,7 +231,7 @@ function CreatedGadgetChatCard({
       <button
         type="button"
         onClick={onOpen}
-        className="group flex w-full cursor-pointer items-stretch overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left shadow-[0_1px_2px_rgba(82,16,0,0.04)] transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-[0_10px_28px_rgba(82,16,0,0.10)]"
+        className="group flex w-full cursor-pointer items-stretch overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left shadow-[0_1px_2px_rgba(176,72,52,0.04)] transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-[0_10px_28px_rgba(176,72,52,0.10)]"
       >
         <span
           className="relative grid w-[88px] flex-shrink-0 place-items-center overflow-hidden border-r border-kumo-line bg-kumo-tint/40"
