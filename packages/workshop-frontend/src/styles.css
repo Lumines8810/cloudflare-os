@@ -3,11 +3,108 @@
 @import "tailwindcss";
 @custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
 
+/* ===== SOLAS SKIN =====
+   This deployment wears the SOLAS Design System's Workshop skin (palette v2: logo terracotta accent,
+   rose, faintly warm greys, ink #322824). The skin is purely a token re-point: the Kumo semantic
+   tokens below keep their names and every component keeps reading them, only the values change.
+   The SOLAS base palette is the single source; Kumo aliases reference it so that light and dark
+   only have to swap the base layer (plus the few surfaces dark mode states explicitly). */
+:root {
+  --solas-accent: #d16b54; /* fill only: primary action, active marker, focus (3.5:1 on white) */
+  --solas-accent-strong: #a8442f; /* text-safe accent (5.9:1): links, brand text */
+  --solas-accent-hover: #dc7b64;
+  --solas-on-accent: #25160b; /* label on an accent fill; white is 3.5:1 */
+  --solas-rose: #cb5480; /* decoration only */
+  --solas-rose-strong: #a33a62;
+  --solas-accent-tint: #fcf5f2;
+  --solas-accent-line: #eebfb2;
+  --solas-accent-soft: #f5d9d0;
+  --solas-accent-wash: #faeee9;
+
+  --solas-ink: #322824;
+  --solas-ink-strong: #25160b;
+  --solas-ink-form: #48413e;
+  --solas-muted: #6e6460;
+  --solas-muted-strong: #574e4a;
+  --solas-inactive: #a59c97;
+  --solas-line: #e9e3df;
+  --solas-line-soft: #f2eeeb;
+  --solas-control-line: #d6cec9;
+  --solas-surface: #ffffff;
+  --solas-wash: #f8f5f3;
+  --solas-wash-strong: #fcfbfa;
+  --solas-fill: #f2eeeb;
+
+  --solas-notice-ink: #854d0e;
+  --solas-notice-tint: #fffbeb;
+  --solas-notice-line: #fde68a;
+  --solas-warn-ink: #a16207;
+  --solas-info-ink: #1e3a8a;
+  --solas-info-tint: #eff6ff;
+  --solas-info-line: #bfdbfe;
+  --solas-ai-ink: #4c1d95;
+  --solas-ai-tint: #faf5ff;
+  --solas-ai-line: #ddd6fe;
+  --solas-danger-ink: #991b1b;
+  --solas-danger-tint: #fee2e2;
+  --solas-danger-strong: #b91c1c;
+  --solas-success-ink: #166534;
+  --solas-success-line: #bbf7d0;
+  --solas-success-tint: #f0fdf4;
+}
+
+/* Dark: neutrals sit on the logo's warm brown hue (~50) and the accent is lifted to stay legible. */
+[data-mode="dark"] {
+  --solas-accent: #e0806a;
+  --solas-accent-strong: #f0a898;
+  --solas-accent-hover: #e8937f;
+  --solas-on-accent: #25160b;
+  --solas-rose: #e07a9c;
+  --solas-rose-strong: #f0a3bd;
+  --solas-accent-tint: oklch(0.26 0.05 32);
+  --solas-accent-line: oklch(0.45 0.1 32);
+  --solas-accent-soft: oklch(0.36 0.08 32);
+  --solas-accent-wash: oklch(0.26 0.05 32);
+
+  --solas-ink: oklch(0.93 0.008 50);
+  --solas-ink-strong: oklch(0.97 0.008 50);
+  --solas-ink-form: oklch(0.82 0.008 50);
+  --solas-muted: oklch(0.7 0.008 50);
+  --solas-muted-strong: oklch(0.78 0.008 50);
+  --solas-inactive: oklch(0.58 0.008 50);
+  --solas-line: oklch(0.33 0.008 50);
+  --solas-line-soft: oklch(0.28 0.008 50);
+  --solas-control-line: oklch(0.4 0.008 50);
+  --solas-surface: oklch(0.2 0.008 50);
+  --solas-wash: oklch(0.17 0.008 50);
+  --solas-wash-strong: oklch(0.23 0.008 50);
+  --solas-fill: oklch(0.28 0.008 50);
+
+  --solas-notice-ink: #fcd34d;
+  --solas-notice-tint: oklch(0.27 0.05 85);
+  --solas-notice-line: oklch(0.42 0.08 85);
+  --solas-warn-ink: #fbbf24;
+  --solas-info-ink: #93c5fd;
+  --solas-info-tint: oklch(0.27 0.06 255);
+  --solas-info-line: oklch(0.42 0.09 255);
+  --solas-ai-ink: #c4b5fd;
+  --solas-ai-tint: oklch(0.27 0.06 300);
+  --solas-ai-line: oklch(0.42 0.09 300);
+  --solas-danger-ink: #fca5a5;
+  --solas-danger-tint: oklch(0.27 0.07 25);
+  --solas-danger-strong: #f87171;
+  --solas-success-ink: #86efac;
+  --solas-success-line: oklch(0.42 0.08 150);
+  --solas-success-tint: oklch(0.26 0.05 150);
+}
+
 @theme {
-  /* ===== FONTS ===== */
-  --font-sans: "FT Kunst Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "Roboto", "Helvetica Neue", sans-serif;
-  --font-mono: "Apercu Mono Pro", "SF Mono", Menlo, Monaco, Consolas, monospace;
+  /* ===== FONTS =====
+     IBM Plex Sans JP / IBM Plex Mono (loaded in index.html) stand in for the licensed OS faces and
+     carry the full Japanese glyph set this deployment needs. */
+  --font-sans: "IBM Plex Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+    "Noto Sans JP", "Yu Gothic UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", Menlo, Monaco, Consolas, monospace;
 
   /* ===== TEXT SIZES (restore Tailwind defaults, overriding Kumo's 12/13/14/16px) ===== */
   --text-xs: 0.75rem;
@@ -20,91 +117,96 @@
   --text-lg--line-height: 1.75rem;
 
   /* ===== KUMO SEMANTIC COLOR OVERRIDES =====
-     Near-neutral, barely-warm greys for every surface, border, and neutral text. The brand orange
-     is reserved for *intent only* (active item, links, primary action, focus) so it actually pops.
-     This is the single biggest lever between a "consumer/playground" feel and an enterprise one. */
+     Faintly warm greys for every surface, border, and neutral text. The terracotta accent is
+     reserved for *intent only* (active item, links, primary action, focus) so it actually pops. */
 
-  /* Background tokens — near-white neutrals with a faint warm undertone */
-  --color-kumo-base: #fcfcfb;
-  --color-kumo-elevated: #f8f8f7;
-  --color-kumo-tint: #f3f3f1;
-  --color-kumo-overlay: #fbfbfa;
-  --color-kumo-recessed: #efeeec;
+  /* Surfaces */
+  --color-kumo-base: #ffffff;
+  --color-kumo-canvas: var(--solas-wash-strong);
+  --color-kumo-elevated: var(--solas-wash);
+  --color-kumo-tint: var(--solas-line-soft);
+  --color-kumo-overlay: #ffffff;
+  --color-kumo-recessed: var(--solas-wash-strong);
   --color-kumo-control: #ffffff;
-  --color-kumo-contrast: #14110f;
-  --color-kumo-fill: #e8e7e4;
-  --color-kumo-fill-hover: #dededb;
-  --color-kumo-interact: #cac8c3;
+  --color-kumo-contrast: var(--solas-ink);
+  --color-kumo-strong: var(--solas-ink-strong);
+  --color-kumo-fill: var(--solas-fill);
+  --color-kumo-fill-hover: var(--solas-line);
+  --color-kumo-interact: var(--solas-control-line);
 
-  /* Brand — warm orange accent (intent only) */
-  --color-kumo-brand: #ff4801;
-  --color-kumo-brand-hover: #e03f00;
+  /* Brand (intent only — never a surface) */
+  --color-kumo-brand: var(--solas-accent);
+  --color-kumo-brand-hover: var(--solas-accent-hover);
+  --color-kumo-focus: var(--color-kumo-brand);
 
-  /* Border / line tokens — neutral hairlines */
-  --color-kumo-line: #1411100f;
-  --color-kumo-ring: #cac8c3;
+  /* Lines */
+  --color-kumo-line: var(--solas-line);
+  --color-kumo-hairline: var(--solas-line-soft);
+  --color-kumo-ring: var(--solas-inactive);
 
   /* Chat surface tokens */
-  --color-kumo-bubble-user: #f1f0ee;
+  --color-kumo-bubble-user: var(--solas-wash-strong);
 
-  /* Status tints — keep functional colors, warm the tints */
-  --color-kumo-info: oklch(62.3% 0.214 259.815);
-  --color-kumo-info-tint: oklch(90% 0.06 250);
-  --color-kumo-warning: oklch(79.5% 0.184 86.047);
-  --color-kumo-warning-tint: oklch(92% 0.08 85);
-  --color-kumo-danger: oklch(63.7% 0.237 25.331);
-  --color-kumo-danger-tint: oklch(92% 0.06 25);
-  --color-kumo-success: oklch(72.3% 0.219 149.579);
-  --color-kumo-success-tint: oklch(92% 0.08 150);
+  /* Status */
+  --color-kumo-info: #2563eb;
+  --color-kumo-info-tint: var(--solas-info-tint);
+  --color-kumo-warning: var(--solas-warn-ink);
+  --color-kumo-warning-tint: var(--solas-notice-tint);
+  --color-kumo-danger: #dc2626;
+  --color-kumo-danger-tint: var(--solas-danger-tint);
+  --color-kumo-success: #16a34a;
+  --color-kumo-success-tint: var(--solas-success-tint);
 
   /* Tooltip */
-  --color-kumo-tip-shadow: #14111014;
+  --color-kumo-tip-shadow: #32282414;
   --color-kumo-arrow-edge: var(--color-kumo-line);
   --color-kumo-arrow-stroke: transparent;
 
-  /* Text color tokens — near-neutral greys (faint warm undertone, no brown) */
-  --text-color-kumo-default: #1c1a18;
-  --text-color-kumo-default-hover: #100f0d;
+  /* Text */
+  --text-color-kumo-default: var(--solas-ink);
+  --text-color-kumo-default-hover: var(--solas-ink-strong);
   --text-color-kumo-inverse: #ffffff;
-  --text-color-kumo-strong: #100f0d;
-  --text-color-kumo-subtle: oklch(52% 0.006 60);
-  --text-color-kumo-inactive: oklch(66% 0.005 60);
-  --text-color-kumo-brand: #ff4801;
-  --text-color-kumo-link: #ff4801;
-  --text-color-kumo-success: oklch(72.3% 0.219 149.579);
-  --text-color-kumo-danger: oklch(63.7% 0.237 25.331);
-  --text-color-kumo-warning: oklch(47.6% 0.114 61.907);
+  --text-color-kumo-strong: var(--solas-ink-strong);
+  --text-color-kumo-subtle: var(--solas-muted);
+  --text-color-kumo-inactive: var(--solas-inactive);
+  --text-color-kumo-placeholder: var(--solas-inactive);
+  --text-color-kumo-brand: var(--solas-accent-strong);
+  --text-color-kumo-on-brand: var(--solas-on-accent);
+  --text-color-kumo-link: var(--solas-accent-strong);
+  --text-color-kumo-success: var(--solas-success-ink);
+  --text-color-kumo-danger: var(--solas-danger-ink);
+  --text-color-kumo-warning: var(--solas-warn-ink);
 
   /* ===== CUSTOM BRAND TOKENS (for direct use alongside Kumo tokens) ===== */
-  --color-accent-100: #ff4801;
-  --color-accent-200: #ff7038;
-  --color-background-100: #fcfcfb;
-  --color-background-200: #f8f8f7;
-  --color-background-300: #f3f3f1;
-  --color-foreground-100: #100f0d;
-  --color-foreground-200: #100f0d;
-  --color-foreground-300: #1c1a18;
-  --color-border-100: #e8e7e4;
-  --color-border-100-50: #e8e7e480;
-  --color-selection-bg: #ffe9e0;
-  --color-selection-text: #ff500a;
-  --color-shadow-accent-light: #ffa683;
-  --color-shadow-accent-dark: #b13200;
+  --color-accent-100: var(--solas-accent);
+  --color-accent-200: #dc7b64;
+  --color-background-100: #ffffff;
+  --color-background-200: var(--solas-wash);
+  --color-background-300: var(--solas-line-soft);
+  --color-foreground-100: var(--solas-ink-strong);
+  --color-foreground-200: var(--solas-ink);
+  --color-foreground-300: var(--solas-muted);
+  --color-border-100: var(--solas-line);
+  --color-border-100-50: #e9e3df80;
+  --color-selection-bg: var(--solas-accent-wash);
+  --color-selection-text: var(--solas-accent-strong);
+  --color-shadow-accent-light: #eebfb2;
+  --color-shadow-accent-dark: #a8442f;
 
-  /* Category colors */
-  --color-compute-100: #0a95ff;
-  --color-compute-200: #0a95ff1a;
-  --color-storage-100: #ee0ddb;
-  --color-storage-200: #ee0ddb1a;
-  --color-ai-100: #19e306;
-  --color-ai-200: #f2f5e1;
-  --color-media-100: #9616ff;
-  --color-media-200: #f8ebee;
+  /* Category colors (OS categories, SOLAS hues) */
+  --color-compute-100: #2563eb;
+  --color-compute-200: #2563eb1a;
+  --color-storage-100: #7c3aed;
+  --color-storage-200: #7c3aed1a;
+  --color-ai-100: var(--solas-ai-ink);
+  --color-ai-200: var(--solas-ai-tint);
+  --color-media-100: #be185d;
+  --color-media-200: #be185d1a;
 
   /* Status colors */
-  --color-status-live: oklch(72.3% 0.219 149.579);
-  --color-status-draft: oklch(68.1% 0.162 75.834);
-  --color-status-building: oklch(62.3% 0.214 259.815);
+  --color-status-live: #16a34a;
+  --color-status-draft: var(--solas-warn-ink);
+  --color-status-building: #2563eb;
 
   /* Spacing / layout */
   --spacing: 0.25rem;
@@ -114,105 +216,83 @@
   --container-3xl: 48rem;
   --container-4xl: 56rem;
 
-  /* Radius */
-  --radius-sm: 0.25rem;
-  --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 0.75rem;
-  --radius-2xl: 1rem;
+  /* Radius — near-square, max 4px */
+  --radius-sm: 1px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
 
   /* Transitions.
      Default CSS curves are too weak to feel intentional; keep them for legacy callers but add
-     stronger custom variants (per Emil Kowalski's guidance) for UI motion:
+     stronger custom variants for UI motion:
        --ease-out-strong    entrances / responsive feedback (starts fast)
        --ease-in-out-strong on-screen movement / morphing
-       --ease-drawer        iOS-like drawer/sheet curve */
+       --ease-drawer        iOS-like drawer/sheet curve
+       --ease-pop           presence pop-in overshoot */
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out-strong: cubic-bezier(0.19, 1, 0.22, 1);
   --ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-pop: cubic-bezier(0.22, 1.2, 0.36, 1);
   --default-transition-duration: 0.15s;
   --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* Shadows */
-  --shadow-stack: 1px 6px 6px 0 #fff3 inset, 0 0 0px 0 #ffffff59 inset,
-    0 4px 12px 0 #00000005, 0 0 0px 0 #00000005, 0 2px 12px 0 #00000008;
+  /* Shadows — warm ink, never pure black */
+  --shadow-stack: 1px 6px 6px 0 #ffffff4d inset, 0 0 0 0 #ffffff59 inset,
+    0 4px 12px 0 #32282405, 0 0 0 0 #32282405, 0 2px 12px 0 #32282408;
 }
 
 [data-mode="dark"] {
-  /* Seal-inspired dark palette: violet-tinted surfaces around hue 285, not neutral black. */
-  --color-kumo-base: oklch(0.115 0.012 285);
-  --color-kumo-elevated: oklch(0.155 0.011 285);
-  --color-kumo-tint: oklch(0.225 0.025 285);
-  --color-kumo-overlay: oklch(0.155 0.011 285);
-  --color-kumo-recessed: oklch(0.1 0.012 285);
-  --color-kumo-control: oklch(0.155 0.011 285);
-  --color-kumo-contrast: var(--color-kumo-brand);
-  --color-kumo-strong: var(--color-kumo-brand-hover);
-  --color-kumo-fill: oklch(0.225 0.025 285);
-  --color-kumo-fill-hover: oklch(0.295 0.045 285);
-  --color-kumo-interact: oklch(0.34 0.022 285);
-  --color-kumo-line: oklch(0.34 0.022 285);
-  --color-kumo-ring: oklch(0.52 0.065 285);
-  --color-kumo-bubble-user: oklch(0.225 0.025 285);
+  --color-kumo-base: oklch(0.15 0.008 50);
+  --color-kumo-canvas: oklch(0.13 0.008 50);
+  --color-kumo-elevated: oklch(0.19 0.008 50);
+  --color-kumo-tint: oklch(0.24 0.008 50);
+  --color-kumo-overlay: oklch(0.19 0.008 50);
+  --color-kumo-recessed: oklch(0.13 0.008 50);
+  --color-kumo-control: oklch(0.19 0.008 50);
+  --color-kumo-contrast: var(--solas-accent);
+  --color-kumo-strong: var(--solas-accent-strong);
+  --color-kumo-fill: oklch(0.26 0.008 50);
+  --color-kumo-fill-hover: oklch(0.31 0.008 50);
+  --color-kumo-interact: oklch(0.4 0.008 50);
+  --color-kumo-line: oklch(0.31 0.008 50);
+  --color-kumo-hairline: oklch(0.26 0.008 50);
+  --color-kumo-ring: oklch(0.55 0.008 50);
+  --color-kumo-bubble-user: oklch(0.24 0.008 50);
 
-  --color-kumo-brand: #b84e00;
-  --color-kumo-brand-hover: #a54200;
+  --color-kumo-brand: #e0806a;
+  --color-kumo-brand-hover: #e8937f;
 
-  --color-kumo-info: oklch(62.3% 0.214 259.815);
-  --color-kumo-info-tint: oklch(0.25 0.065 259.815);
-  --color-kumo-warning: oklch(55.5% 0.163 48.998);
-  --color-kumo-warning-tint: oklch(0.27 0.06 84.429);
-  --color-kumo-danger: oklch(50.5% 0.213 27.518);
-  --color-kumo-danger-tint: oklch(0.25 0.065 25.331);
-  --color-kumo-success: oklch(52.7% 0.154 150.069);
-  --color-kumo-success-tint: oklch(0.25 0.06 150.069);
+  --color-kumo-info: #60a5fa;
+  --color-kumo-warning: #fbbf24;
+  --color-kumo-danger: #f87171;
+  --color-kumo-success: #4ade80;
 
   --color-kumo-tip-shadow: #00000066;
   --color-kumo-arrow-edge: transparent;
   --color-kumo-arrow-stroke: var(--color-kumo-line);
 
-  --text-color-kumo-default: oklch(0.92 0.01 285);
-  --text-color-kumo-default-hover: oklch(0.97 0.006 285);
-  --text-color-kumo-inverse: #ffffff;
-  --text-color-kumo-strong: oklch(0.92 0.01 285);
-  --text-color-kumo-subtle: oklch(0.66 0.02 285);
-  --text-color-kumo-inactive: oklch(0.58 0.025 285);
-  --text-color-kumo-brand: #ff8a5c;
-  --text-color-kumo-link: #ff8a5c;
-  --text-color-kumo-success: oklch(79.2% 0.209 151.711);
-  --text-color-kumo-danger: oklch(70.4% 0.191 22.216);
-  --text-color-kumo-warning: oklch(82.8% 0.189 84.429);
+  --text-color-kumo-brand: #f0a898;
+  --text-color-kumo-link: #f0a898;
 
-  --color-accent-100: #b84e00;
-  --color-accent-200: #ff8a5c;
-  --color-background-100: oklch(0.115 0.012 285);
-  --color-background-200: oklch(0.155 0.011 285);
-  --color-background-300: oklch(0.225 0.025 285);
-  --color-foreground-100: oklch(0.92 0.01 285);
-  --color-foreground-200: oklch(0.78 0.018 285);
-  --color-foreground-300: oklch(0.66 0.02 285);
-  --color-border-100: oklch(0.34 0.022 285);
-  --color-border-100-50: oklch(0.34 0.022 285 / 0.5);
+  --color-accent-100: #e0806a;
+  --color-accent-200: #f0a898;
+  --color-background-100: oklch(0.15 0.008 50);
+  --color-background-200: oklch(0.19 0.008 50);
+  --color-background-300: oklch(0.24 0.008 50);
+  --color-border-100: oklch(0.31 0.008 50);
+  --color-border-100-50: oklch(0.31 0.008 50 / 0.5);
   --color-selection-bg: color-mix(in srgb, var(--color-kumo-brand) 28%, transparent);
-  --color-selection-text: oklch(0.97 0.006 285);
-  --color-shadow-accent-light: #ff663355;
+  --color-selection-text: oklch(0.97 0.008 50);
+  --color-shadow-accent-light: #e0806a55;
   --color-shadow-accent-dark: #00000080;
 
-  --color-compute-100: oklch(74% 0.16 250);
-  --color-compute-200: oklch(0.25 0.065 250);
-  --color-storage-100: oklch(78% 0.22 325);
-  --color-storage-200: oklch(0.25 0.07 325);
-  --color-ai-100: oklch(79.2% 0.209 151.711);
-  --color-ai-200: oklch(0.25 0.06 150);
-  --color-media-100: oklch(78% 0.19 300);
-  --color-media-200: oklch(0.25 0.07 300);
-
-  --color-status-live: oklch(79.2% 0.209 151.711);
-  --color-status-draft: oklch(82.8% 0.189 84.429);
-  --color-status-building: oklch(74% 0.16 250);
+  --color-status-live: #4ade80;
+  --color-status-draft: #fbbf24;
+  --color-status-building: #60a5fa;
 
   --shadow-stack: 1px 6px 6px 0 #ffffff08 inset, 0 0 0 1px #ffffff05 inset,
     0 18px 40px 0 #00000033, 0 4px 12px 0 #0000002e;
@@ -326,7 +406,7 @@ code {
 
 .template-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 8px 30px rgba(50, 40, 36, 0.06);
 }
 
 /* Smooth scrolling */
@@ -373,53 +453,53 @@ html {
 .themed-prompt-card-shadow {
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill) 75%, transparent),
-    0 1px 2px rgba(20, 17, 16, 0.03),
-    0 10px 28px -16px rgba(20, 17, 16, 0.12);
+    0 1px 2px rgba(50, 40, 36, 0.03),
+    0 10px 28px -16px rgba(50, 40, 36, 0.12);
 }
 
 .themed-prompt-card-shadow:focus-within {
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill) 85%, transparent),
-    0 1px 2px rgba(20, 17, 16, 0.04),
-    0 14px 34px -14px rgba(20, 17, 16, 0.16);
+    0 1px 2px rgba(50, 40, 36, 0.04),
+    0 14px 34px -14px rgba(50, 40, 36, 0.16);
 }
 
 .themed-user-bubble-shadow {
   box-shadow:
-    0 1px 1px rgba(82, 16, 0, 0.03),
+    0 1px 1px rgba(176, 72, 52, 0.03),
     inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill) 65%, transparent);
 }
 
 .themed-thumbnail-shadow {
-  box-shadow: 0 2px 14px rgba(20, 17, 16, 0.1);
+  box-shadow: 0 2px 14px rgba(50, 40, 36, 0.1);
 }
 
 .themed-floating-shadow {
-  box-shadow: 0 8px 20px rgba(82, 16, 0, 0.1);
+  box-shadow: 0 8px 20px rgba(176, 72, 52, 0.1);
 }
 
 .themed-floating-shadow-lg {
-  box-shadow: 0 14px 36px rgba(82, 16, 0, 0.1);
+  box-shadow: 0 14px 36px rgba(176, 72, 52, 0.1);
 }
 
 .themed-bottom-shadow {
-  box-shadow: 0 4px 10px -8px rgba(82, 16, 0, 0.1);
+  box-shadow: 0 4px 10px -8px rgba(176, 72, 52, 0.1);
 }
 
 .themed-compact-shadow {
-  box-shadow: 0 8px 24px -20px rgba(82, 16, 0, 0.28);
+  box-shadow: 0 8px 24px -20px rgba(176, 72, 52, 0.28);
 }
 
 .themed-compact-shadow:focus-within {
-  box-shadow: 0 10px 28px -20px rgba(82, 16, 0, 0.34);
+  box-shadow: 0 10px 28px -20px rgba(176, 72, 52, 0.34);
 }
 
 .themed-card-hover-shadow:hover {
-  box-shadow: 0 8px 20px -16px rgba(82, 16, 0, 0.12);
+  box-shadow: 0 8px 20px -16px rgba(176, 72, 52, 0.12);
 }
 
 .themed-row-hover-shadow:hover {
-  box-shadow: 0 8px 20px -18px rgba(82, 16, 0, 0.28);
+  box-shadow: 0 8px 20px -18px rgba(176, 72, 52, 0.28);
 }
 
 .themed-accent-glow {
@@ -597,7 +677,7 @@ html {
 }
 
 .presence-pop-in {
-  animation: presence-pop-in 0.22s cubic-bezier(0.22, 1.2, 0.36, 1) both;
+  animation: presence-pop-in 0.22s var(--ease-pop) both;
 }
 
 @keyframes presence-pop-out {
@@ -770,7 +850,7 @@ html {
 .reveal-row {
   opacity: 0;
   transform: translateY(4px);
-  animation: reveal-row 220ms cubic-bezier(0.23, 1, 0.32, 1) forwards;
+  animation: reveal-row 220ms var(--ease-out-strong) forwards;
 }
 
 @keyframes reveal-row {

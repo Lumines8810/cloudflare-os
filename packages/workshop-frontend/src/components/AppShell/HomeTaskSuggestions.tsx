@@ -1,10 +1,7 @@
-import { useMemo } from 'react'
 import {
-  AppWindow,
-  ChartLineUp,
-  FileText,
-  Lightning,
-  Presentation,
+  ChartBar,
+  SealCheck,
+  ShoppingCart,
   type Icon,
 } from '@phosphor-icons/react'
 
@@ -19,48 +16,33 @@ type TaskSuggestion = {
   icon: Icon
 }
 
-// Formats are advertised by example rather than by a row of "Start with Docs" buttons, so the
-// first move isn't "pick a file type". The formats themselves are in the composer's `+` menu.
+// SOLAS work tasks (costing, sourcing, brand review), one per blueprint this deployment ships, in
+// place of the upstream generic examples. Each prompt keeps the human-review stop the SOLAS
+// blueprints require: provisional figures stay provisional, and nothing is saved unasked.
 const SUGGESTIONS: TaskSuggestion[] = [
   {
-    id: 'one-on-one',
-    label: 'Write a 1:1 pre-read',
-    description: 'A doc with a snapshot, things to inspect, and one ask',
-    icon: FileText,
+    id: 'costing',
+    label: 'ロット別の原価を比較する',
+    description: 'BOM版とロット数を固定して、仮計算と判断用計算を並べる',
+    icon: ChartBar,
     prompt:
-      'Create a document to prepare for my next 1:1 with a direct report: a current snapshot, a coaching frame, things to inspect, carryover items from last time, and one clear ask.',
+      'BOM-001 rev.3 を100・500・1,000個で原価比較して。固定費が未確定なら判断用計算は止めて。',
   },
   {
-    id: 'team-meeting',
-    label: 'Build a team meeting deck',
-    description: 'Slides with progress, risks, and what needs a decision',
-    icon: Presentation,
+    id: 'sourcing',
+    label: '見積の改訂を記録する',
+    description: '仕入先・見積ID・有効期限を案件に紐づける',
+    icon: ShoppingCart,
     prompt:
-      'Create a slide deck for my next team meeting: where things stand, what shipped, risks and blockers, and the decisions I need from the room. Ask me what the team is working on first.',
+      '山田精密からの見積改訂（quoteRef: Q-2026-114 rev.2）を案件 SOLAS-2026-001 に記録して。',
   },
   {
-    id: 'insights',
-    label: 'Find insights in my data',
-    description: 'Turn a spreadsheet or CSV into trends and recommendations',
-    icon: ChartLineUp,
+    id: 'brand',
+    label: '制作提案をブランド検査にかける',
+    description: '文章・色・書体・素材IDの宣言だけを決定的に検査',
+    icon: SealCheck,
     prompt:
-      'Turn a dataset I will share (a spreadsheet, CSV, or pasted table) into a narrative analysis: key trends, anomalies, the "so what", and concrete recommendations.',
-  },
-  {
-    id: 'workflow',
-    label: 'Automate a workflow',
-    description: 'Trigger an agent when a new email arrives',
-    icon: Lightning,
-    prompt:
-      'Create an agent workflow that runs automatically when a new email arrives: read the message, decide what to do, and take action or draft a reply. Ask me which inbox to watch and what it should handle.',
-  },
-  {
-    id: 'app',
-    label: 'Build a quick tool',
-    description: 'A small interactive app, calculator, or dashboard',
-    icon: AppWindow,
-    prompt:
-      'Build a small interactive tool I can use right here — a calculator, dashboard, or explorer. Ask me what it should do, then create it.',
+      '保存済みのブランド版に対して、パッケージ提案の文章と色・書体を検査して。保存はしないで。',
   },
 ]
 
@@ -99,35 +81,18 @@ function SuggestionRow({
   )
 }
 
-// How many of the suggestions above to show at once. The list is longer than the page should be:
-// four rows is inspiration, seven is a menu to read. Which three appear is chosen per visit, so the
-// ones below the fold still get seen -- and so Home doesn't look like it only does one thing.
-const VISIBLE_SUGGESTIONS = 3
-
-function pickSuggestions(): TaskSuggestion[] {
-  let shuffled = [...SUGGESTIONS]
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    let j = Math.floor(Math.random() * (i + 1))
-    ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
-  }
-  return shuffled.slice(0, VISIBLE_SUGGESTIONS)
-}
-
 export default function HomeTaskSuggestions({
   onPick,
 }: {
   onPick: (prompt: string) => void
 }) {
-  // Chosen once per mount: re-rolling on every render would shuffle the list under the pointer.
-  const visible = useMemo(pickSuggestions, [])
-
   return (
     <section aria-label="Example tasks" className="flex flex-col gap-1">
       <h3 className="px-1 pb-1 text-[12px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
         Get started
       </h3>
       <ul className="flex flex-col gap-0.5">
-        {visible.map((suggestion) => (
+        {SUGGESTIONS.map((suggestion) => (
           <SuggestionRow
             key={suggestion.id}
             icon={<suggestion.icon size={16} />}
