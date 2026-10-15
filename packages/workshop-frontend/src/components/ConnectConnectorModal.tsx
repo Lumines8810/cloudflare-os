@@ -306,7 +306,7 @@ export default function ConnectConnectorModal({
               className="relative mt-5 overflow-hidden rounded-lg border border-kumo-line px-4 py-3"
               style={{
                 background:
-                  'linear-gradient(180deg, rgba(255, 72, 1, 0.04) 0%, rgba(255, 72, 1, 0.02) 100%)',
+                  'linear-gradient(180deg, color-mix(in srgb, var(--color-kumo-brand) 4%, transparent) 0%, color-mix(in srgb, var(--color-kumo-brand) 2%, transparent) 100%)',
               }}
             >
               <div className="flex items-start gap-3">
