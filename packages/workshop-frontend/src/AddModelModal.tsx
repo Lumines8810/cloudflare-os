@@ -122,7 +122,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // Reset all state when dialog closes
   useEffect(() => {
     if (!visible) {
-      if (login) void authenticatedApi.disconnectChatgpt().catch(() => {})
       setLogin(null)
       setConnectionMethod('default')
       setSelection(null)
@@ -164,7 +163,10 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       }
     }
     timer = setTimeout(poll, login.intervalMs)
-    return () => { active = false; clearTimeout(timer) }
+    return () => {
+      active = false; clearTimeout(timer)
+      void authenticatedApi.cancelChatgptLogin(login.loginId).catch(() => {})
+    }
   }, [visible, login, authenticatedApi])
 
   const startLogin = async () => {
@@ -319,7 +321,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                   <a className="underline" href={login.verificationUri} target="_blank" rel="noopener noreferrer">Continue to ChatGPT</a>
                   <p>Waiting for authorization… The code expires in 15 minutes.</p>
                   <Button variant="secondary" onClick={async () => {
-                    try { await authenticatedApi.disconnectChatgpt(); setLogin(null) }
+                    try { await authenticatedApi.cancelChatgptLogin(login.loginId); setLogin(null) }
                     catch { setLoginError('Could not cancel sign-in.') }
                   }}>Cancel sign-in</Button>
                 </div>

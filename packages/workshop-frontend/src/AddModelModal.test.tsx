@@ -35,6 +35,7 @@ vi.mock('@cloudflare/kumo', async () => {
 })
 
 let root: Root
+let renderModal: (visible: boolean) => void
 let container: HTMLDivElement
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previous = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -58,19 +59,39 @@ async function mount(connected: boolean) {
       verificationUri: 'https://auth.openai.com/codex/device', intervalMs: 5000,
       expiresAt: Date.now() + 900000 })),
     pollChatgptLogin: vi.fn<AuthenticatedApi["pollChatgptLogin"]>(async () => true),
+    cancelChatgptLogin: vi.fn<AuthenticatedApi["cancelChatgptLogin"]>(async () => {}),
     disconnectChatgpt: vi.fn<AuthenticatedApi["disconnectChatgpt"]>(async () => {}),
     addModel: vi.fn<AuthenticatedApi["addModel"]>(async () => {}),
   }
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
-  await act(async () => root.render(<AddModelModal visible onCancel={vi.fn<() => void>()} onSuccess={vi.fn<() => void>()}
+  renderModal = visible => root.render(<AddModelModal visible={visible} onCancel={vi.fn<() => void>()} onSuccess={vi.fn<() => void>()}
     authenticatedApi={api as unknown as RpcStub<AuthenticatedApi>}
-    aiConfig={{ enabled: true, enabledProviders: ['cloudflare'] }} />))
+    aiConfig={{ enabled: true, enabledProviders: ['cloudflare'] }} />)
+  await act(async () => renderModal(true))
   return api
 }
 
 describe('LLM connection selection', () => {
+  it('closing a pending login cancels that attempt without disconnecting a completed connection', async () => {
+    const api = await mount(false)
+    await click('Sign in with ChatGPT · subscription')
+    await click('Sign in with ChatGPT')
+    await act(async () => renderModal(false))
+    expect(api.cancelChatgptLogin).toHaveBeenCalledWith('attempt')
+    expect(api.disconnectChatgpt).not.toHaveBeenCalled()
+  })
+
+  it('the cancel-sign-in button targets only its pending login', async () => {
+    const api = await mount(false)
+    await click('Sign in with ChatGPT · subscription')
+    await click('Sign in with ChatGPT')
+    await click('Cancel sign-in')
+    expect(api.cancelChatgptLogin).toHaveBeenCalledWith('attempt')
+    expect(api.disconnectChatgpt).not.toHaveBeenCalled()
+  })
+
   it('offers API keys even when the deployment gateway only enables Cloudflare', async () => {
     const api = await mount(false)
     await click('OpenAI API key · usage-based billing')
