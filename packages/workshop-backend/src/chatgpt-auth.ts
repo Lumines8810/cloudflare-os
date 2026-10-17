@@ -9,14 +9,19 @@ type Pending = ChatgptDeviceLogin & { deviceAuthId: string; nextPollAt: number }
 export type ChatgptState = { id: string; credentials?: Credentials; pending?: Pending };
 
 async function request(path: string, body: Record<string, string>): Promise<Response> {
+  const tokenExchange = path === "/oauth/token";
   return fetch(`${ISSUER}${path}`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(15000), redirect: "manual",
+    method: "POST", headers: { "Content-Type": tokenExchange
+      ? "application/x-www-form-urlencoded" : "application/json" },
+    body: tokenExchange ? new URLSearchParams(body).toString() : JSON.stringify(body),
+    signal: AbortSignal.timeout(15000), redirect: "manual",
   });
 }
 
 async function readObject(response: Response): Promise<Record<string, unknown>> {
-  const data: unknown = await response.json();
+  let data: unknown;
+  try { data = await response.json(); }
+  catch { throw new Error("ChatGPT returned an invalid authentication response."); }
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw new Error("ChatGPT returned an invalid authentication response.");
   }
@@ -42,6 +47,12 @@ export class ChatgptConnection {
 
   connected(): boolean { return !!this.read()?.credentials; }
   disconnect(): void { this.save(null); }
+
+  /** Cancel only this unfinished attempt, leaving newer or established connections intact. */
+  cancel(loginId: string): void {
+    const state = this.read();
+    if (state?.id === loginId && state.pending) this.save(null);
+  }
 
   async start(): Promise<ChatgptDeviceLogin> {
     // Reserve the attempt before awaiting; cancellation or another start invalidates this request.

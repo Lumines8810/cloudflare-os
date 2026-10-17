@@ -136,6 +136,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   startChatgptLogin() { return this.#user.startChatgptLogin(); }
   pollChatgptLogin(loginId: string) { return this.#user.pollChatgptLogin(loginId); }
+  cancelChatgptLogin(loginId: string) { return this.#user.cancelChatgptLogin(loginId); }
   isChatgptConnected() { return this.#user.isChatgptConnected(); }
   disconnectChatgpt() { return this.#user.disconnectChatgpt(); }
   deleteModel(id: string): Promise<void> {

@@ -631,6 +631,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async startChatgptLogin() { return this.chatgpt.start(); }
   async pollChatgptLogin(loginId: string) { return this.chatgpt.poll(loginId); }
+  async cancelChatgptLogin(loginId: string) { this.chatgpt.cancel(loginId); }
   async isChatgptConnected() { return this.chatgpt.connected(); }
   async disconnectChatgpt() {
     this.chatgpt.disconnect();

@@ -61,3 +61,15 @@ the same billing route. Provider errors never switch it to another paid route.
 Unit tests use synthetic credentials and mock HTTP responses. A real subscription
 sign-in, real API inference, and a deployment smoke test remain necessary before
 production rollout. Never put credentials in tracked files or PR descriptions.
+
+## Cancelling a pending sign-in
+
+Closing the add-model dialog or cancelling a device sign-in cancels only that
+matching unfinished attempt. A different tab's newer attempt or a completed
+connection is preserved. Only **Disconnect ChatGPT** removes an established
+connection and its model entries. Authentication failures, including malformed
+JSON, use bounded fixed messages rather than returning provider response bodies.
+
+The device-code endpoints use JSON, while `/oauth/token` uses form encoding for
+both authorization-code exchange and refresh, matching the pinned adapter and
+[Codex token exchange](https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs).

@@ -393,6 +393,9 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Polls this user's login attempt, respecting the server-provided polling interval. */
   pollChatgptLogin(loginId: string): Promise<boolean>;
 
+  /** Cancels only the matching unfinished attempt, preserving established connections and models. */
+  cancelChatgptLogin(loginId: string): Promise<void>;
+
   /** Reports whether this user has connected ChatGPT; never returns tokens. */
   isChatgptConnected(): Promise<boolean>;
 
