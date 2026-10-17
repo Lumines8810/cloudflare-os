@@ -1,3 +1,5 @@
+import { decodeJwt } from "jose";
+import type { UserDurableObject } from "./user.js";
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import type {
@@ -11,6 +13,8 @@ import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/opena
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
+import { stream as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
@@ -50,6 +54,7 @@ type GatewayMetadataContext = {
 };
 
 type ModelRoutingOptions = {
+  users?: DurableObjectNamespace<UserDurableObject>;
   sessionAffinity?: string;
   userGateway?: UserGatewayRouting;
   metadata?: GatewayMetadataContext;
@@ -118,6 +123,7 @@ function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataCon
 // `providers/all`, which drags ~30 providers into the bundle).
 const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
   "anthropic-messages": anthropicMessagesStream as StreamFunction<Api, SimpleStreamOptions>,
+  "openai-codex-responses": codexStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-responses": openaiResponsesStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-completions": openaiCompletionsStream as StreamFunction<Api, SimpleStreamOptions>,
   "google-generative-ai": googleGenerativeAiStream as StreamFunction<Api, SimpleStreamOptions>,
@@ -305,7 +311,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
   const apiExtras: Record<string, unknown> =
       args.model.api === "anthropic-messages"
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
-      args.model.api === "openai-responses" ? { reasoningEffort: "medium" } : {};
+      (args.model.api === "openai-responses" || args.model.api === "openai-codex-responses") ? { reasoningEffort: "medium" } : {};
 
   const handle: ModelHandle = {
     model: args.model,
@@ -331,6 +337,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
             : args.model.api === "anthropic-messages" ? { thinkingEnabled: false } : {}),
         ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
         ...options,
+        ...(args.model.api === "openai-codex-responses" ? { transport: "sse" as const } : {}),
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
@@ -364,6 +371,39 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // Explicit per-model billing always takes precedence, including after gateway quota exhaustion.
+  if (config.authMode === "chatgpt") {
+    if (config.provider !== "openai") throw new Error("ChatGPT requires an OpenAI model.");
+    const model = (OPENAI_CODEX_MODELS as Record<string, Model<Api>>)[config.model];
+    if (!model) throw new Error("This model is unavailable through ChatGPT. Choose a Codex model.");
+    const userId = config.chatgptUserId;
+    const users = options.users;
+    if (userId && !users) throw new Error("ChatGPT token refresh is unavailable.");
+    return makeHandle({ model: { ...model, cost: ZERO_COST }, apiKey: config.apiToken,
+      sessionAffinity: options.sessionAffinity,
+      // Each request rechecks the connection, so long-running agents and model bindings can
+      // refresh credentials and a disconnect takes effect before the next provider request.
+      ...(userId && users ? { fetch: async (input, init) => {
+        if (String(input) !== "https://chatgpt.com/backend-api/codex/responses") {
+          throw new Error("Unexpected ChatGPT endpoint.");
+        }
+        const token = await users.get(users.idFromString(userId)).getChatgptAccessToken();
+        const claims = decodeJwt(token)["https://api.openai.com/auth"];
+        const account = typeof claims === "object" && claims !== null
+          ? (claims as Record<string, unknown>).chatgpt_account_id : undefined;
+        if (typeof account !== "string" || !account) throw new Error("Invalid ChatGPT account.");
+        const headers = new Headers(init?.headers);
+        headers.set("authorization", `Bearer ${token}`);
+        headers.set("chatgpt-account-id", account);
+        return fetch(input, { ...init, headers, redirect: "manual" });
+      } } : {}),
+    });
+  }
+  if (config.authMode === "apiKey") {
+    if (config.provider !== "openai") throw new Error("API key routing requires an OpenAI model.");
+    return getModelDirect(config, options.sessionAffinity);
+  }
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -694,6 +734,7 @@ export class LanguageModelGatekeeper
       : Promise<LanguageModelBinding> {
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
+      users: this.ctx.exports.UserDurableObject,
     });
     return new LanguageModelBindingImpl(model);
   }

@@ -4095,7 +4095,7 @@ class OverseerImpl implements AgentHooks {
       // (This runs inside the try so the `finally` below still clears the active-agent state and
       // emits a stream "clear" — otherwise the UI would spin forever on a block.)
       let byokRouting: UserGatewayRouting | undefined;
-      if (!callbackInitiated && this.ownerId) {
+      if (!callbackInitiated && this.ownerId && !aiModel.config.authMode) {
         let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
         let usage = await checkUsageAndBalance(this.env, ownerStub);
         if (!usage.allowed) {
@@ -4119,6 +4119,7 @@ class OverseerImpl implements AgentHooks {
       let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
       let chosenModel = getModel(
           this.env, aiModel.config, initiator, {
+            users: this.users,
             sessionAffinity,
             userGateway: byokRouting,
             metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
@@ -4674,7 +4675,7 @@ class OverseerImpl implements AgentHooks {
       subject: string, takenNames: Set<string>,
       quick: {config: AiModelConfig, initiator: AiChatAuthorInfo}): Promise<string | undefined> {
     try {
-      let model = getModel(this.env, quick.config, quick.initiator);
+      let model = getModel(this.env, quick.config, quick.initiator, { users: this.users });
       let result = await completeText(model, {
         signal: AbortSignal.timeout(10_000),
         prompt:
@@ -5346,6 +5347,7 @@ class OverseerImpl implements AgentHooks {
                             initiator: AiChatAuthorInfo): Promise<void> {
     try {
       let model = getModel(this.env, modelConfig, initiator, {
+        users: this.users,
         metadata: { source: "thread-title", gadgetId: this.ctx.id.toString(), chatId },
       });
 
@@ -5403,6 +5405,7 @@ class OverseerImpl implements AgentHooks {
       }
 
       let model = getModel(this.env, modelConfig, initiator, {
+        users: this.users,
         metadata: { source: "gadget-title", gadgetId: this.ctx.id.toString(), chatId },
       });
 

@@ -1,3 +1,4 @@
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import {SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage, type AiModelConfig}
   from "@gadgets/workshop-shared/api";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
@@ -27,6 +28,12 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
  */
 export function getModelTokenLimits(config: AiModelConfig):
     {inputBudget: number, maxOutputTokens?: number} {
+  if (config.authMode === "chatgpt") {
+    const codex = OPENAI_CODEX_MODELS[config.model as keyof typeof OPENAI_CODEX_MODELS];
+    if (!codex) throw new Error("Unknown ChatGPT model.");
+    const maxOutputTokens = Math.min(codex.maxTokens, 128000, Math.floor(codex.contextWindow / 2));
+    return { inputBudget: codex.contextWindow - maxOutputTokens, maxOutputTokens };
+  }
   let model = SUGGESTED_MODELS[config.provider][config.model];
   let maxOutputTokens = model?.outputLimit ??
       (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined);

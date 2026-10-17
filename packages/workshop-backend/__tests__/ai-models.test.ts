@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
 
@@ -617,4 +617,70 @@ describe("PDF attachment bridging", () => {
       image_url: "data:image/png;base64,iVBOR",
     }));
   }, 15000);
+});
+
+
+describe("explicit OpenAI billing selection", () => {
+  beforeEach(() => { capturedRequests.length = 0; });
+
+  it("uses the API key even with both platform and user gateways configured", async () => {
+    const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol",
+      authMode: "apiKey", apiToken: "explicit-api-key" }, INITIATOR,
+      { userGateway: { accountId: "user-account", apiKey: "gateway-secret" } });
+    const request = await captureRequest(handle);
+    expect(request.url).toBe("https://api.openai.com/v1/responses");
+    expect(request.headers.get("authorization")).toBe("Bearer explicit-api-key");
+    expect(request.headers.has("cf-aig-authorization")).toBe(false);
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+  });
+
+  it("uses the ChatGPT Codex endpoint and never falls back to API billing", async () => {
+    const token = `header.${btoa(JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: "subscription-account" },
+    }))}.signature`;
+    const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol",
+      authMode: "chatgpt", apiToken: token }, INITIATOR,
+      { userGateway: { accountId: "user-account", apiKey: "gateway-secret" } });
+    const request = await captureRequest(handle);
+    expect(request.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(request.headers.get("authorization")).toBe(`Bearer ${token}`);
+    expect(request.headers.get("chatgpt-account-id")).toBe("subscription-account");
+    expect(request.headers.has("cf-aig-authorization")).toBe(false);
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+    expect(handle.model.cost.input).toBe(0);
+    expect(capturedRequests).toHaveLength(1);
+  });
+
+  it("rejects unsupported subscription models without falling back", () => {
+    expect(() => getModel(env(), { provider: "openai", model: "unsupported-model",
+      authMode: "chatgpt", apiToken: "token" }, INITIATOR)).toThrow("unavailable through ChatGPT");
+  });
+});
+
+
+it("rechecks ChatGPT credentials for each inference request, including a long-lived binding", async () => {
+  const token = (account: string) => `header.${btoa(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_account_id: account },
+  }))}.signature`;
+  const currentToken = vi.fn().mockResolvedValueOnce(token("first-account"))
+    .mockResolvedValueOnce(token("second-account"))
+    .mockRejectedValueOnce(new Error("Sign in with ChatGPT first."));
+  const users = { idFromString: (id: string) => id, get: () => ({ getChatgptAccessToken: currentToken }) };
+  const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol",
+    authMode: "chatgpt", apiToken: token("old-account"), chatgptUserId: "owner-do" }, INITIATOR,
+    { users: users as unknown as NonNullable<Parameters<typeof getModel>[3]>["users"] });
+  capturedRequests.length = 0;
+  vi.stubGlobal("fetch", fetchStub);
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const stream = handle.stream(handle.model, { messages: [
+        { role: "user", content: "hello", timestamp: 0 },
+      ] }, { maxRetries: 0 });
+      expect((await stream.result()).stopReason).toBe("error");
+    }
+    expect(currentToken).toHaveBeenCalledTimes(3);
+    expect(capturedRequests).toHaveLength(2);
+    expect(capturedRequests[0].headers.get("chatgpt-account-id")).toBe("first-account");
+    expect(capturedRequests[1].headers.get("authorization")).toBe(`Bearer ${token("second-account")}`);
+  } finally { vi.unstubAllGlobals(); }
 });
