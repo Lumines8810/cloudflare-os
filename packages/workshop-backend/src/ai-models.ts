@@ -1,3 +1,4 @@
+import type { UserDurableObject } from "./user.js";
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import {
@@ -23,6 +24,8 @@ import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/opena
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
+import { stream as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
@@ -68,6 +71,7 @@ type GatewayMetadataContext = {
 };
 
 export type ModelRoutingOptions = {
+  users?: DurableObjectNamespace<UserDurableObject>;
   sessionAffinity?: string;
   userGateway?: UserGatewayRouting;
   metadata?: GatewayMetadataContext;
@@ -122,7 +126,7 @@ export type ModelHandle = {
    */
   lastResponse?: { status: number; aiGatewayLogId?: string };
 
-  /** Classification of the most recent guarded failure, cleared at each new request. */
+  /** Classification of the most recent pre-execution/provider failure, cleared for each request. */
   lastFailure?: { kind: AiRequestFailureKind; statusCode?: number };
 };
 
@@ -141,6 +145,7 @@ function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataCon
 // `providers/all`, which drags ~30 providers into the bundle).
 const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
   "anthropic-messages": anthropicMessagesStream as StreamFunction<Api, SimpleStreamOptions>,
+  "openai-codex-responses": codexStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-responses": openaiResponsesStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-completions": openaiCompletionsStream as StreamFunction<Api, SimpleStreamOptions>,
   "google-generative-ai": googleGenerativeAiStream as StreamFunction<Api, SimpleStreamOptions>,
@@ -307,6 +312,8 @@ type HandleArgs = {
   fetch?: FetchFunction;
   /** Optional platform quota guard; absent for BYOK and unlimited deployments. */
   aiRequestGuard?: AiRequestGuard;
+  /** Resolve fresh user-owned credentials at request time instead of persisting a token snapshot. */
+  resolveApiKey?: () => Promise<string>;
 };
 
 function errorStatusFromMessage(message: string): number | undefined {
@@ -344,18 +351,19 @@ function errorMessageFromUnknown(error: unknown): string {
   return error instanceof Error ? error.message : `${error}`;
 }
 
-async function pipeGuardedStream(
+async function pipeModelStream(
     outer: AssistantMessageEventStream,
     handle: ModelHandle,
     model: Model<Api>,
     context: Context,
     options: SimpleStreamOptions,
     streamFn: StreamFunction<Api, SimpleStreamOptions>,
-    guard: AiRequestGuard,
+    guard?: AiRequestGuard,
+    resolveApiKey?: () => Promise<string>,
 ): Promise<void> {
   let lease: {reservationId: string} | undefined;
   let safeSettle = async (outcome: AiRequestOutcome) => {
-    if (!lease) return;
+    if (!lease || !guard) return;
     try {
       await guard.settle(lease.reservationId, outcome);
     } catch {
@@ -373,7 +381,7 @@ async function pipeGuardedStream(
 
   try {
     options.signal?.throwIfAborted();
-    lease = await guard.reserve();
+    lease = await guard?.reserve();
   } catch (error) {
     let kind: AiRequestFailureKind = options.signal?.aborted ? "aborted"
         : error instanceof AiRequestGuardError ? error.kind : "result-unknown";
@@ -383,8 +391,13 @@ async function pipeGuardedStream(
 
   try {
     // Reservation is the retry boundary: a provider SDK retry would be a second billable request
-    // hidden behind one reservation, so guarded calls always disable SDK retries.
-    let inner = streamFn(model, context, {...options, maxRetries: 0});
+    // hidden behind one reservation. Resolved user credentials likewise belong to this attempt;
+    // an explicit retry must recheck the connection. Neither path permits hidden SDK retries.
+    const credentials = resolveApiKey ? { apiKey: await resolveApiKey() } : {};
+    options.signal?.throwIfAborted();
+    let inner = streamFn(model, context, {
+      ...options, ...credentials, ...(guard || resolveApiKey ? { maxRetries: 0 } : {}),
+    });
     let finalEvent: Extract<AssistantMessageEvent, {type: "done" | "error"}> | undefined;
     for await (let event of inner) {
       if (event.type === "done" || event.type === "error") {
@@ -449,7 +462,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
   const apiExtras: Record<string, unknown> =
       args.model.api === "anthropic-messages"
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
-      args.model.api === "openai-responses" ? { reasoningEffort: "medium" } : {};
+      (args.model.api === "openai-responses" || args.model.api === "openai-codex-responses") ? { reasoningEffort: "medium" } : {};
 
   const handle: ModelHandle = {
     model: args.model,
@@ -476,6 +489,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
             : args.model.api === "anthropic-messages" ? { thinkingEnabled: false } : {}),
         ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
         ...options,
+        ...(args.model.api === "openai-codex-responses" ? { transport: "sse" as const } : {}),
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
@@ -494,16 +508,16 @@ function makeHandle(args: HandleArgs): ModelHandle {
           return bridgePdfAttachments(args.model.api, replaced ?? payload) ?? replaced;
         },
       };
-      if (!args.aiRequestGuard) {
+      if (!args.aiRequestGuard && !args.resolveApiKey) {
         return streamFn(model, context, merged);
       }
 
       // Keep the public ModelHandle.stream contract synchronous for pi-agent-core and existing
-      // callers, while the outer event stream performs the async reservation before constructing
-      // the provider stream.
+      // callers, while the outer event stream resolves credentials and reserves any platform
+      // quota before constructing the provider stream.
       let outer = createAssistantMessageEventStream();
-      void pipeGuardedStream(
-          outer, handle, model, context, merged, streamFn, args.aiRequestGuard);
+      void pipeModelStream(
+          outer, handle, model, context, merged, streamFn, args.aiRequestGuard, args.resolveApiKey);
       return outer;
     },
   };
@@ -519,6 +533,30 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // Explicit per-model billing always takes precedence, including after gateway quota exhaustion.
+  if (config.authMode === "chatgpt") {
+    if (config.provider !== "openai") throw new Error("ChatGPT requires an OpenAI model.");
+    const model = (OPENAI_CODEX_MODELS as Record<string, Model<Api>>)[config.model];
+    if (!model) throw new Error("This model is unavailable through ChatGPT. Choose a Codex model.");
+    const userId = config.chatgptUserId;
+    const users = options.users;
+    if (!userId || !users) throw new Error("ChatGPT requires a user-scoped connection.");
+    return makeHandle({ model: { ...model, cost: ZERO_COST },
+      sessionAffinity: options.sessionAffinity,
+      resolveApiKey: () => users.get(users.idFromString(userId)).getChatgptAccessToken(),
+      fetch: async (input, init) => {
+        if (String(input) !== "https://chatgpt.com/backend-api/codex/responses") {
+          throw new Error("Unexpected ChatGPT endpoint.");
+        }
+        return fetch(input, { ...init, redirect: "manual" });
+      },
+    });
+  }
+  if (config.authMode === "apiKey") {
+    if (config.provider !== "openai") throw new Error("API key routing requires an OpenAI model.");
+    return getModelDirect(config, options.sessionAffinity);
+  }
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -857,6 +895,7 @@ export class LanguageModelGatekeeper
     let aiRequestGuard = createApprovalQueueAiRequestGuard(this.env, approvalQueue);
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
+      users: this.ctx.exports.UserDurableObject,
       aiRequestGuard,
     });
     return new LanguageModelBindingImpl(model);

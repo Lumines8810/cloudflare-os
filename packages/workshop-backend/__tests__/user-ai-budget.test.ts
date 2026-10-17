@@ -87,3 +87,21 @@ describe("UserDurableObject AI request reservations", () => {
     expect(daily.get()?.count).toBe(1);
   });
 });
+
+it("keeps bearer tokens out of ChatGPT contexts and model-binding configurations", async () => {
+  const { user } = makeUser();
+  let tokenReads = 0;
+  Object.assign(user, {
+    ctx: { id: { toString: () => "owner-do" } },
+    chatgpt: { accessToken: async () => { tokenReads++; return "private-bearer-token"; } },
+    storage: {
+      profile: { get: () => ({ type: "user", id: "owner", name: "Owner" }) },
+      aiModels: { get: () => ({ profile: { type: "agent", id: "model", name: "Model" },
+        config: { provider: "openai", model: "gpt-5.6-sol", authMode: "chatgpt", apiToken: "" } }) },
+    },
+  });
+  const context = await user.getChatContext("model");
+  expect(context.aiModel?.config).toMatchObject({ apiToken: "", chatgptUserId: "owner-do" });
+  expect(JSON.stringify(context)).not.toContain("private-bearer-token");
+  expect(tokenReads).toBe(0);
+});

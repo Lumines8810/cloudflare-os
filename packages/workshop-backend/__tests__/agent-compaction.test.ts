@@ -455,3 +455,15 @@ describe("boundary arithmetic", () => {
     ]);
   });
 });
+
+
+it("reserves the ChatGPT model's actual window instead of the larger API window", () => {
+  expect(getModelTokenLimits({ provider: "openai", model: "gpt-5.6-sol",
+    apiToken: "", authMode: "chatgpt" })).toEqual({ inputBudget: 144000, maxOutputTokens: 128000 });
+});
+
+
+it("keeps a positive ChatGPT input budget even when output maximum equals its window", () => {
+  expect(getModelTokenLimits({ provider: "openai", model: "gpt-5.3-codex-spark",
+    apiToken: "", authMode: "chatgpt" })).toEqual({ inputBudget: 64000, maxOutputTokens: 64000 });
+});

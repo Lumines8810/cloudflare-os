@@ -387,6 +387,21 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
 
+  /** Starts a user-scoped ChatGPT device login. No bearer credentials leave the server. */
+  startChatgptLogin(): Promise<ChatgptDeviceLogin>;
+
+  /** Polls this user's login attempt, respecting the server-provided polling interval. */
+  pollChatgptLogin(loginId: string): Promise<boolean>;
+
+  /** Cancels only the matching unfinished attempt, preserving established connections and models. */
+  cancelChatgptLogin(loginId: string): Promise<void>;
+
+  /** Reports whether this user has connected ChatGPT; never returns tokens. */
+  isChatgptConnected(): Promise<boolean>;
+
+  /** Cancels pending login, removes credentials and this user's ChatGPT model entries. */
+  disconnectChatgpt(): Promise<void>;
+
   /** Deletes a configured model. */
   deleteModel(id: string): Promise<void>;
 
@@ -1143,6 +1158,20 @@ export type AiGatewayInfo = {
   enabled: false;
 };
 
+/** Public device authorization instructions; the device secret stays in the user's DO. */
+export type ChatgptDeviceLogin = {
+  /** Opaque attempt identifier scoped to the authenticated user. */
+  loginId: string;
+  /** One-time code to enter on OpenAI's verification page. */
+  userCode: string;
+  /** Fixed OpenAI verification page. */
+  verificationUri: string;
+  /** Earliest supported polling interval in milliseconds. */
+  intervalMs: number;
+  /** Authorization deadline as Unix milliseconds. */
+  expiresAt: number;
+};
+
 /** Configuration specifying how to connect to an AI model provider. */
 export type AiModelConfig = {
   /** Which AI provider hosts the model? */
@@ -1150,6 +1179,12 @@ export type AiModelConfig = {
 
   /** Name of the specific model, as specified to the provider's API. */
   model: string;
+
+  /** Explicit OpenAI billing route. Omitted preserves existing gateway routing. */
+  authMode?: "apiKey" | "chatgpt";
+
+  /** Server-resolved user DO identifier for refreshing ChatGPT tokens. Ignored on model creation. */
+  chatgptUserId?: string;
 
   /** Secret API token for the respective provider, for billing purposes. */
   apiToken: string;

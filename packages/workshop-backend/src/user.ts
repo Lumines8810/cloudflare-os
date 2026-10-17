@@ -22,6 +22,9 @@ import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archi
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
+import { ChatgptConnection, type ChatgptState } from "./chatgpt-auth.js";
+
 const logger = createWorkshopLogger("workshop.user");
 
 // How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
@@ -225,6 +228,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
       // null until a Cloudflare account is connected and resolved.
       cloudflareBilling: <CloudflareBilling | null>null,
+      chatgpt: <ChatgptState | null>null,
 
       created: false,
       profile: <AiChatAuthorInfo>{
@@ -367,6 +371,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     this.storage = makeUserStorage(ctx.storage);
+    this.chatgpt = new ChatgptConnection(
+      () => this.storage.chatgpt.get(), state => this.storage.chatgpt.put(state));
     this.adminSettings = this.ctx.exports.AdminSettings;
 
     this.vendors = buildGatekeeperVendorMap(env);
@@ -618,9 +624,39 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
+  private chatgpt: ChatgptConnection;
+
+  /** Internal only; intentionally absent from AuthenticatedApi. */
+  async getChatgptAccessToken() { return this.chatgpt.accessToken(); }
+
+  async startChatgptLogin() { return this.chatgpt.start(); }
+  async pollChatgptLogin(loginId: string) { return this.chatgpt.poll(loginId); }
+  async cancelChatgptLogin(loginId: string) { this.chatgpt.cancel(loginId); }
+  async isChatgptConnected() { return this.chatgpt.connected(); }
+  async disconnectChatgpt() {
+    this.chatgpt.disconnect();
+    for (const record of this.storage.aiModels.list()) {
+      if (record.config.authMode === "chatgpt") this.storage.aiModels.delete(record.profile.id);
+    }
+  }
+
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
     let gwConfig = getAiGatewayConfig(this.env);
-    if (gwConfig && !gwConfig.providers.has(config.provider)) {
+    if (config.authMode !== undefined) {
+      if (config.provider !== "openai" || !["apiKey", "chatgpt"].includes(config.authMode)) {
+        throw new Error("Explicit authentication is only supported for OpenAI.");
+      }
+      if (config.authMode === "chatgpt") {
+        if (!Object.hasOwn(OPENAI_CODEX_MODELS, config.model)) throw new Error("Choose a model supported by ChatGPT/Codex.");
+        if (!this.chatgpt.connected()) throw new Error("Sign in with ChatGPT first.");
+        config = { provider: "openai", model: config.model, apiToken: "", authMode: "chatgpt" };
+      } else if (!config.apiToken.trim()) {
+        throw new Error("An API key is required.");
+      }
+      // Keep the same model under distinct billing routes; never overwrite gateway models.
+      profile = { ...profile, id: `openai:${config.authMode}:${config.model}` };
+    }
+    if (!config.authMode && gwConfig && !gwConfig.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
     }
 
@@ -870,6 +906,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         result.aiModel = this.storage.aiModels.get(modelId);
       }
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
+      if (result.aiModel.config.authMode === "chatgpt") {
+        result.aiModel = { ...result.aiModel, config: {
+          ...result.aiModel.config, apiToken: "",
+          chatgptUserId: this.ctx.id.toString(),
+        } };
+      }
+    }
+
+    // Explicit billing choices also apply to title generation; never silently use the gateway.
+    if (result.aiModel?.config.authMode) {
+      result.quickModel = result.aiModel.config;
+      return result;
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).

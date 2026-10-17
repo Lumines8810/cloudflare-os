@@ -131,6 +131,8 @@ While you can code a Gadget by hand if you want, the expectation is that AI writ
 
 You can choose your LLM. Cloudflare OS works with many major AI model providers and self-hosted models, with more providers being added all the time.
 
+This SOLAS fork also offers separate **Sign in with ChatGPT** (Codex subscription) and **OpenAI API key** (usage-based) connections. Add both in AI providers and switch in the chat model picker. See [connection setup and limits](docs/chatgpt-and-api-key.md).
+
 Because of the tightly-integrated and simplified nature of the platform, even when using the same underlying AI models, the Cloudflare OS coding agent often performs better and faster with fewer tokens than a general-purpose coding agent would.
 
 ### Collaborate with AI

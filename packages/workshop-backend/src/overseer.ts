@@ -4101,7 +4101,7 @@ class OverseerImpl implements AgentHooks {
       // emits a stream "clear" — otherwise the UI would spin forever on a block.)
       let byokRouting: UserGatewayRouting | undefined;
       let aiRequestGuard: AiRequestGuard | undefined;
-      if (this.ownerId) {
+      if (this.ownerId && !aiModel.config.authMode) {
         let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
         let usage = await checkUsageAndBalance(this.env, ownerStub);
         if (!usage.allowed) {
@@ -4127,6 +4127,7 @@ class OverseerImpl implements AgentHooks {
       let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
       let chosenModel = getModel(
           this.env, aiModel.config, initiator, {
+            users: this.users,
             sessionAffinity,
             userGateway: byokRouting,
             aiRequestGuard,
@@ -4537,7 +4538,9 @@ class OverseerImpl implements AgentHooks {
       config: AiModelConfig,
       initiator: AiChatAuthorInfo,
       options: Pick<ModelRoutingOptions, "metadata"> = {}): Promise<ModelHandle | undefined> {
-    if (!this.ownerId) return getModel(this.env, config, initiator, options);
+    if (!this.ownerId || config.authMode) {
+      return getModel(this.env, config, initiator, { ...options, users: this.users });
+    }
 
     let ownerStub = this.#ownerUserDo();
     let usage = await checkUsageAndBalance(this.env, ownerStub);
@@ -4548,6 +4551,7 @@ class OverseerImpl implements AgentHooks {
         : createUserAiRequestGuard(this.env, ownerStub);
     return getModel(this.env, config, initiator, {
       ...options,
+      users: this.users,
       userGateway,
       aiRequestGuard,
     });
