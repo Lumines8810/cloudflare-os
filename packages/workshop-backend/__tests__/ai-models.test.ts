@@ -789,3 +789,41 @@ it("does not retry a ChatGPT HTTP request behind a resolved credential", async (
   expect((await stream.result()).stopReason).toBe("error");
   expect(request).toHaveBeenCalledTimes(1);
 });
+
+it("streams a successful Codex SSE response using current user credentials", async () => {
+  const token = `header.${btoa(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_account_id: "account" },
+  }))}.signature`;
+  const item = { id: "msg_test", type: "message", role: "assistant", status: "completed",
+    content: [{ type: "output_text", text: "Ready", annotations: [] }] };
+  const events = [
+    { type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+    { type: "response.content_part.added", output_index: 0, content_index: 0, item_id: item.id,
+      part: { type: "output_text", text: "", annotations: [] } },
+    { type: "response.output_text.delta", output_index: 0, content_index: 0, item_id: item.id, delta: "Ready" },
+    { type: "response.output_item.done", output_index: 0, item },
+    { type: "response.completed", response: { id: "resp_test", status: "completed", output: [item],
+      usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } },
+  ];
+  const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol", authMode: "chatgpt",
+    apiToken: "", chatgptUserId: "owner-do" }, INITIATOR, userRouting(token));
+  const request = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = new Request(input, init);
+    expect(req.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(req.headers.get("authorization")).toBe(`Bearer ${token}`);
+    return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""),
+      { headers: { "Content-Type": "text/event-stream" } });
+  });
+  const stream = handle.stream(handle.model, { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+    { fetch: request });
+  const received = [];
+  for await (const event of stream) received.push(event.type);
+  const result = await stream.result();
+  expect(received).toContain("text_delta");
+  expect(received.at(-1)).toBe("done");
+  expect(result.stopReason).toBe("stop");
+  expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Ready" }));
+  expect(result.usage.totalTokens).toBe(12);
+  expect(result.usage.cost.total).toBe(0);
+  expect(request).toHaveBeenCalledTimes(1);
+});
