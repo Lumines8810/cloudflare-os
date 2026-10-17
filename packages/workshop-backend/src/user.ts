@@ -908,7 +908,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
       if (result.aiModel.config.authMode === "chatgpt") {
         result.aiModel = { ...result.aiModel, config: {
-          ...result.aiModel.config, apiToken: await this.chatgpt.accessToken(),
+          ...result.aiModel.config, apiToken: "",
           chatgptUserId: this.ctx.id.toString(),
         } };
       }

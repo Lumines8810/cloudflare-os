@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
-import { getModel, type ModelHandle } from "../src/ai-models.js";
+import { getModel, type ModelHandle, type ModelRoutingOptions } from "../src/ai-models.js";
 import {
   AiRequestGuardError,
   type AiRequestGuard,
@@ -95,6 +95,13 @@ function env(overrides: Partial<Cloudflare.Env> = {}): Cloudflare.Env {
     CF_AI_GATEWAY_PROVIDERS: "anthropic,openai,google",
     ...overrides,
   } as Cloudflare.Env;
+}
+
+function userRouting(token: string): Pick<ModelRoutingOptions, "users"> {
+  return { users: {
+    idFromString: (id: string) => id,
+    get: () => ({ getChatgptAccessToken: async () => token }),
+  } as unknown as ModelRoutingOptions["users"] };
 }
 
 type CapturedRequest = { url: string; headers: Headers; body: string };
@@ -703,8 +710,8 @@ describe("explicit OpenAI billing selection", () => {
       "https://api.openai.com/auth": { chatgpt_account_id: "subscription-account" },
     }))}.signature`;
     const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol",
-      authMode: "chatgpt", apiToken: token }, INITIATOR,
-      { userGateway: { accountId: "user-account", apiKey: "gateway-secret" } });
+      authMode: "chatgpt", apiToken: "", chatgptUserId: "owner-do" }, INITIATOR,
+      { ...userRouting(token), userGateway: { accountId: "user-account", apiKey: "gateway-secret" } });
     const request = await captureRequest(handle);
     expect(request.url).toBe("https://chatgpt.com/backend-api/codex/responses");
     expect(request.headers.get("authorization")).toBe(`Bearer ${token}`);
@@ -731,7 +738,7 @@ it("rechecks ChatGPT credentials for each inference request, including a long-li
     .mockRejectedValueOnce(new Error("Sign in with ChatGPT first."));
   const users = { idFromString: (id: string) => id, get: () => ({ getChatgptAccessToken: currentToken }) };
   const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol",
-    authMode: "chatgpt", apiToken: token("old-account"), chatgptUserId: "owner-do" }, INITIATOR,
+    authMode: "chatgpt", apiToken: "", chatgptUserId: "owner-do" }, INITIATOR,
     { users: users as unknown as NonNullable<Parameters<typeof getModel>[3]>["users"] });
   capturedRequests.length = 0;
   vi.stubGlobal("fetch", fetchStub);
@@ -754,11 +761,31 @@ it("does not reserve platform quota for an explicitly user-funded model", async 
   const reserve = vi.fn(async () => { throw new Error("platform budget exhausted"); });
   const guard = { reserve, settle: vi.fn(async () => {}) };
   for (const authMode of ["apiKey", "chatgpt"] as const) {
+    const token = `header.${btoa(JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: "account" },
+    }))}.signature`;
     const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol", authMode,
-      apiToken: authMode === "apiKey" ? "key" : `header.${btoa(JSON.stringify({
-        "https://api.openai.com/auth": { chatgpt_account_id: "account" },
-      }))}.signature` }, INITIATOR, { aiRequestGuard: guard });
+      apiToken: authMode === "apiKey" ? "key" : "", chatgptUserId: "owner-do" }, INITIATOR,
+      { ...userRouting(token), aiRequestGuard: guard });
     await captureRequest(handle);
   }
   expect(reserve).not.toHaveBeenCalled();
+});
+
+it("refuses ChatGPT credential snapshots without a user-scoped connection", () => {
+  expect(() => getModel(env(), { provider: "openai", model: "gpt-5.6-sol",
+    authMode: "chatgpt", apiToken: "stale-token" }, INITIATOR)).toThrow("user-scoped");
+});
+
+it("does not retry a ChatGPT HTTP request behind a resolved credential", async () => {
+  const token = `header.${btoa(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_account_id: "account" },
+  }))}.signature`;
+  const request = vi.fn(async () => new Response(null, { status: 503 }));
+  const handle = getModel(env(), { provider: "openai", model: "gpt-5.6-sol",
+    authMode: "chatgpt", apiToken: "", chatgptUserId: "owner-do" }, INITIATOR, userRouting(token));
+  const stream = handle.stream(handle.model, { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+    { fetch: request, maxRetries: 1 });
+  expect((await stream.result()).stopReason).toBe("error");
+  expect(request).toHaveBeenCalledTimes(1);
 });

@@ -1,4 +1,3 @@
-import { decodeJwt } from "jose";
 import type { UserDurableObject } from "./user.js";
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
@@ -127,7 +126,7 @@ export type ModelHandle = {
    */
   lastResponse?: { status: number; aiGatewayLogId?: string };
 
-  /** Classification of the most recent guarded failure, cleared at each new request. */
+  /** Classification of the most recent pre-execution/provider failure, cleared for each request. */
   lastFailure?: { kind: AiRequestFailureKind; statusCode?: number };
 };
 
@@ -313,6 +312,8 @@ type HandleArgs = {
   fetch?: FetchFunction;
   /** Optional platform quota guard; absent for BYOK and unlimited deployments. */
   aiRequestGuard?: AiRequestGuard;
+  /** Resolve fresh user-owned credentials at request time instead of persisting a token snapshot. */
+  resolveApiKey?: () => Promise<string>;
 };
 
 function errorStatusFromMessage(message: string): number | undefined {
@@ -350,18 +351,19 @@ function errorMessageFromUnknown(error: unknown): string {
   return error instanceof Error ? error.message : `${error}`;
 }
 
-async function pipeGuardedStream(
+async function pipeModelStream(
     outer: AssistantMessageEventStream,
     handle: ModelHandle,
     model: Model<Api>,
     context: Context,
     options: SimpleStreamOptions,
     streamFn: StreamFunction<Api, SimpleStreamOptions>,
-    guard: AiRequestGuard,
+    guard?: AiRequestGuard,
+    resolveApiKey?: () => Promise<string>,
 ): Promise<void> {
   let lease: {reservationId: string} | undefined;
   let safeSettle = async (outcome: AiRequestOutcome) => {
-    if (!lease) return;
+    if (!lease || !guard) return;
     try {
       await guard.settle(lease.reservationId, outcome);
     } catch {
@@ -379,7 +381,7 @@ async function pipeGuardedStream(
 
   try {
     options.signal?.throwIfAborted();
-    lease = await guard.reserve();
+    lease = await guard?.reserve();
   } catch (error) {
     let kind: AiRequestFailureKind = options.signal?.aborted ? "aborted"
         : error instanceof AiRequestGuardError ? error.kind : "result-unknown";
@@ -389,8 +391,13 @@ async function pipeGuardedStream(
 
   try {
     // Reservation is the retry boundary: a provider SDK retry would be a second billable request
-    // hidden behind one reservation, so guarded calls always disable SDK retries.
-    let inner = streamFn(model, context, {...options, maxRetries: 0});
+    // hidden behind one reservation. Resolved user credentials likewise belong to this attempt;
+    // an explicit retry must recheck the connection. Neither path permits hidden SDK retries.
+    const credentials = resolveApiKey ? { apiKey: await resolveApiKey() } : {};
+    options.signal?.throwIfAborted();
+    let inner = streamFn(model, context, {
+      ...options, ...credentials, ...(guard || resolveApiKey ? { maxRetries: 0 } : {}),
+    });
     let finalEvent: Extract<AssistantMessageEvent, {type: "done" | "error"}> | undefined;
     for await (let event of inner) {
       if (event.type === "done" || event.type === "error") {
@@ -501,16 +508,16 @@ function makeHandle(args: HandleArgs): ModelHandle {
           return bridgePdfAttachments(args.model.api, replaced ?? payload) ?? replaced;
         },
       };
-      if (!args.aiRequestGuard) {
+      if (!args.aiRequestGuard && !args.resolveApiKey) {
         return streamFn(model, context, merged);
       }
 
       // Keep the public ModelHandle.stream contract synchronous for pi-agent-core and existing
-      // callers, while the outer event stream performs the async reservation before constructing
-      // the provider stream.
+      // callers, while the outer event stream resolves credentials and reserves any platform
+      // quota before constructing the provider stream.
       let outer = createAssistantMessageEventStream();
-      void pipeGuardedStream(
-          outer, handle, model, context, merged, streamFn, args.aiRequestGuard);
+      void pipeModelStream(
+          outer, handle, model, context, merged, streamFn, args.aiRequestGuard, args.resolveApiKey);
       return outer;
     },
   };
@@ -533,25 +540,16 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
     if (!model) throw new Error("This model is unavailable through ChatGPT. Choose a Codex model.");
     const userId = config.chatgptUserId;
     const users = options.users;
-    if (userId && !users) throw new Error("ChatGPT token refresh is unavailable.");
-    return makeHandle({ model: { ...model, cost: ZERO_COST }, apiKey: config.apiToken,
+    if (!userId || !users) throw new Error("ChatGPT requires a user-scoped connection.");
+    return makeHandle({ model: { ...model, cost: ZERO_COST },
       sessionAffinity: options.sessionAffinity,
-      // Each request rechecks the connection, so long-running agents and model bindings can
-      // refresh credentials and a disconnect takes effect before the next provider request.
-      ...(userId && users ? { fetch: async (input, init) => {
+      resolveApiKey: () => users.get(users.idFromString(userId)).getChatgptAccessToken(),
+      fetch: async (input, init) => {
         if (String(input) !== "https://chatgpt.com/backend-api/codex/responses") {
           throw new Error("Unexpected ChatGPT endpoint.");
         }
-        const token = await users.get(users.idFromString(userId)).getChatgptAccessToken();
-        const claims = decodeJwt(token)["https://api.openai.com/auth"];
-        const account = typeof claims === "object" && claims !== null
-          ? (claims as Record<string, unknown>).chatgpt_account_id : undefined;
-        if (typeof account !== "string" || !account) throw new Error("Invalid ChatGPT account.");
-        const headers = new Headers(init?.headers);
-        headers.set("authorization", `Bearer ${token}`);
-        headers.set("chatgpt-account-id", account);
-        return fetch(input, { ...init, headers, redirect: "manual" });
-      } } : {}),
+        return fetch(input, { ...init, redirect: "manual" });
+      },
     });
   }
   if (config.authMode === "apiKey") {

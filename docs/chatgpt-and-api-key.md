@@ -73,3 +73,11 @@ JSON, use bounded fixed messages rather than returning provider response bodies.
 The device-code endpoints use JSON, while `/oauth/token` uses form encoding for
 both authorization-code exchange and refresh, matching the pinned adapter and
 [Codex token exchange](https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs).
+
+ChatGPT model contexts and persistent model-binding props carry only the owning
+User DO identifier. They never copy a bearer-token snapshot. Every request
+resolves current credentials before starting the Codex adapter; configurations
+without the owning user reference fail closed, including after disconnect.
+A ChatGPT model invocation makes one provider attempt. An explicit retry starts
+a new invocation and rechecks the connection, so an SDK retry cannot reuse a
+credential after disconnect.
