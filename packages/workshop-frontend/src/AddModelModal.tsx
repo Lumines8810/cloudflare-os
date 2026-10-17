@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Select, SensitiveInput, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
+import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, ChatgptDeviceLogin, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
@@ -92,6 +92,11 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
 export default function AddModelModal({ visible, onCancel, onSuccess, authenticatedApi, aiConfig }: AddModelModalProps) {
   const toasts = useKumoToastManager()
 
+  const [connectionMethod, setConnectionMethod] = useState<'default' | 'apiKey' | 'chatgpt'>('default')
+  const [chatgptConnected, setChatgptConnected] = useState(false)
+  const [login, setLogin] = useState<ChatgptDeviceLogin | null>(null)
+  const [loginError, setLoginError] = useState('')
+  const [loginBusy, setLoginBusy] = useState(false)
   const [loading, setLoading] = useState(false)
   const [selection, setSelection] = useState<SelectionType | null>(null)
   const [selectValue, setSelectValue] = useState<string | undefined>(undefined)
@@ -109,7 +114,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // Advanced settings collapsible state
   const [advancedOpen, setAdvancedOpen] = useState(false)
 
-  const gatewayMode = aiConfig?.enabled === true
+  const gatewayMode = connectionMethod === 'default' && aiConfig?.enabled === true
   const enabledProviders: Set<string> | null = gatewayMode
     ? new Set(aiConfig.enabledProviders)
     : null
@@ -117,6 +122,9 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // Reset all state when dialog closes
   useEffect(() => {
     if (!visible) {
+      if (login) void authenticatedApi.disconnectChatgpt().catch(() => {})
+      setLogin(null)
+      setConnectionMethod('default')
       setSelection(null)
       setSelectValue(undefined)
       setModelId('')
@@ -128,6 +136,44 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setAdvancedOpen(false)
     }
   }, [visible])
+
+  useEffect(() => {
+    if (!visible) return
+    let active = true
+    authenticatedApi.isChatgptConnected().then(connected => {
+      if (active) setChatgptConnected(connected)
+    }).catch(() => { if (active) setLoginError('Could not read ChatGPT connection status.') })
+    return () => { active = false }
+  }, [visible, authenticatedApi])
+
+  useEffect(() => {
+    if (!visible || !login) return
+    let active = true
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        if (Date.now() >= login.expiresAt) throw new Error('Sign-in expired. Start again.')
+        const connected = await authenticatedApi.pollChatgptLogin(login.loginId)
+        if (!active) return
+        if (connected) {
+          setChatgptConnected(true)
+          setLogin(null)
+        } else timer = setTimeout(poll, login.intervalMs)
+      } catch {
+        if (active) { setLoginError('Sign-in failed or expired. Start again.'); setLogin(null) }
+      }
+    }
+    timer = setTimeout(poll, login.intervalMs)
+    return () => { active = false; clearTimeout(timer) }
+  }, [visible, login, authenticatedApi])
+
+  const startLogin = async () => {
+    setLoginBusy(true)
+    setLoginError('')
+    try { setLogin(await authenticatedApi.startChatgptLogin()) }
+    catch { setLoginError('Could not start ChatGPT sign-in. Enable device code login in your ChatGPT security settings and try again.') }
+    finally { setLoginBusy(false) }
+  }
 
   const handleModelSelect = (value: string) => {
     setSelectValue(value)
@@ -161,7 +207,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
     const isOllama = selection?.provider === 'ollama'
     const isCloudflare = selection?.provider === 'cloudflare'
-    const showCredentials = !gatewayMode
+    const showCredentials = !gatewayMode && connectionMethod !== 'chatgpt'
 
     if (showCredentials && selection && !isOllama && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
@@ -175,6 +221,9 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       newErrors.apiUrl = 'Please enter the Ollama API URL'
     }
 
+    if (connectionMethod === 'chatgpt' && !chatgptConnected) {
+      newErrors.selection = 'Sign in with ChatGPT first'
+    }
     setErrors(newErrors)
     return Object.keys(newErrors).length === 0
   }
@@ -190,16 +239,17 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
       const profile: AiChatAuthorInfo = {
         type: 'agent',
-        id: finalModelId,
-        name: finalDisplayName,
+        id: connectionMethod === 'default' ? finalModelId : `openai:${connectionMethod}:${finalModelId}`,
+        name: connectionMethod === 'default' ? finalDisplayName : `${finalDisplayName} · ${connectionMethod === 'chatgpt' ? 'ChatGPT subscription' : 'API key (usage-based)'}`,
       }
 
       const config: AiModelConfig = {
         provider: selection!.provider,
         model: finalModelId,
-        apiToken: gatewayMode ? '' : apiToken.trim(),
+        apiToken: gatewayMode || connectionMethod === 'chatgpt' ? '' : apiToken.trim(),
+        ...(connectionMethod !== 'default' && { authMode: connectionMethod }),
         ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
-        ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
+        ...(!gatewayMode && connectionMethod !== 'chatgpt' && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
       }
 
       await authenticatedApi.addModel(profile, config)
@@ -213,12 +263,12 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     }
   }
 
-  const options = buildOptions(gatewayMode, enabledProviders)
+  const options = buildOptions(gatewayMode, enabledProviders).filter(option => connectionMethod === 'default' || option.provider === 'openai')
   const showCustomFields = selection?.type === 'custom'
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
-  const showCredentials = !gatewayMode
+  const showCredentials = !gatewayMode && connectionMethod !== 'chatgpt'
 
   // Group options by provider for rendering with visual separators.
   const groupedOptions: { provider: string; items: typeof options }[] = []
@@ -232,13 +282,52 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   }
 
   return (
-    <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) onCancel() }}>
+    <Dialog.Root open={visible} onOpenChange={(open) => { if (!open && !loginBusy) onCancel() }}>
       <Dialog className="p-6" size="lg">
         <Dialog.Title className="text-lg font-semibold mb-4">
           Add AI Model
         </Dialog.Title>
 
         <div className="space-y-4">
+          <Select
+            label="LLM connection / billing"
+            value={connectionMethod}
+            onValueChange={value => {
+              setConnectionMethod(value as typeof connectionMethod)
+              setSelection(null); setSelectValue(undefined); setErrors({})
+              setApiToken(''); setApiUrl(''); setAccountId('')
+            }}
+          >
+            <Select.Option value="default">Existing providers / AI Gateway</Select.Option>
+            <Select.Option value="chatgpt">Sign in with ChatGPT · subscription</Select.Option>
+            <Select.Option value="apiKey">OpenAI API key · usage-based billing</Select.Option>
+          </Select>
+          {connectionMethod === 'chatgpt' && (
+            <div className="space-y-2 text-sm text-kumo-default">
+              <p>Uses Codex models included in your ChatGPT plan, subject to its limits and model availability. API credits are billed separately.</p>
+              {chatgptConnected ? (
+                <>
+                  <p role="status">ChatGPT connected</p>
+                  <Button variant="secondary" onClick={async () => {
+                    try { await authenticatedApi.disconnectChatgpt(); setChatgptConnected(false); onSuccess() }
+                    catch { setLoginError('Could not disconnect ChatGPT.') }
+                  }}>Disconnect ChatGPT</Button>
+                </>
+              ) : login ? (
+                <div role="status" className="space-y-2">
+                  <p>Open the verification page and enter: <strong>{login.userCode}</strong></p>
+                  <a className="underline" href={login.verificationUri} target="_blank" rel="noopener noreferrer">Continue to ChatGPT</a>
+                  <p>Waiting for authorization… The code expires in 15 minutes.</p>
+                  <Button variant="secondary" onClick={async () => {
+                    try { await authenticatedApi.disconnectChatgpt(); setLogin(null) }
+                    catch { setLoginError('Could not cancel sign-in.') }
+                  }}>Cancel sign-in</Button>
+                </div>
+              ) : <Button variant="primary" loading={loginBusy} onClick={startLogin}>Sign in with ChatGPT</Button>}
+              {loginError && <p role="alert" className="text-kumo-danger">{loginError}</p>}
+            </div>
+          )}
+          {connectionMethod === 'apiKey' && <p className="text-sm text-kumo-subtle">Uses your existing OpenAI API key and bills API usage. This selection bypasses AI Gateway.</p>}
           {/* Model / Provider selection */}
           <Select
             label={gatewayMode ? 'Select Provider' : 'Select Model'}
@@ -362,7 +451,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         {/* Footer */}
         <div className="mt-6 flex justify-end gap-2">
           <Dialog.Close render={(props) => (
-            <Button variant="secondary" {...props} disabled={loading}>
+            <Button variant="secondary" {...props} disabled={loading || loginBusy}>
               Cancel
             </Button>
           )} />
@@ -370,7 +459,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             variant="primary"
             onClick={handleSubmit}
             loading={loading}
-            disabled={!selection}
+            disabled={!selection || (connectionMethod === 'chatgpt' && !chatgptConnected)}
           >
             Add Model
           </Button>
