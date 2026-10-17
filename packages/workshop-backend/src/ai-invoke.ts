@@ -1,4 +1,5 @@
 import type { Message, Usage } from "@earendil-works/pi-ai";
+import type { AiRequestFailureKind } from "@gadgets/workshop-shared/limits";
 import type { ModelHandle } from "./ai-models.js";
 
 /**
@@ -21,10 +22,13 @@ export function zeroUsage(): Usage {
 export class AgentTurnError extends Error {
   /** HTTP status of the failing request, when the handle observed a response for it. */
   readonly statusCode?: number;
+  /** Server-side request classification, when the model handle was budget-guarded. */
+  readonly kind?: AiRequestFailureKind;
 
-  constructor(message: string, statusCode?: number) {
+  constructor(message: string, statusCode?: number, kind?: AiRequestFailureKind) {
     super(message);
     this.statusCode = statusCode;
+    this.kind = kind;
   }
 }
 
@@ -72,7 +76,8 @@ export async function completeText(handle: ModelHandle, args: {
     // Surface a cancellation as the abort reason, like a directly-aborted request would.
     args.signal?.throwIfAborted();
     const errorMessage = message.errorMessage ?? "The model request failed.";
-    throw new AgentTurnError(errorMessage, httpStatusFromError(errorMessage, handle));
+    throw new AgentTurnError(
+        errorMessage, httpStatusFromError(errorMessage, handle), handle.lastFailure?.kind);
   }
   return message.content
       .filter(block => block.type === "text")

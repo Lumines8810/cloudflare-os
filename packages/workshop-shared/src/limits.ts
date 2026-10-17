@@ -30,6 +30,36 @@ export const LIMIT_ERROR_MESSAGES = {
 /** The window over which the free-tier limit is measured. */
 export type LimitWindowKind = "daily" | "rolling";
 
+/**
+ * Stable classification for one server-side AI request. These values are persisted with the
+ * reservation so accounting and incident triage can distinguish a rejected request from a request
+ * whose provider result could not be determined.
+ */
+export type AiRequestFailureKind =
+  | "budget-denied"
+  | "rate-limit"
+  | "provider"
+  | "result-unknown"
+  | "input-invalid"
+  | "aborted";
+
+/** Outcome recorded after an AI request reservation has been used. */
+export type AiRequestOutcome = "success" | AiRequestFailureKind;
+
+/** Result of the atomic pre-execution AI request reservation. */
+export interface AiRequestReservationResult {
+  /** True only when the caller owns a reservation and may contact the model provider. */
+  allowed: boolean;
+  /** The caller-supplied id echoed back for an allowed reservation. */
+  reservationId?: string;
+  /** Calls remaining after this reservation, when a finite daily window applies. */
+  remaining?: number;
+  /** ISO timestamp at which the current window resets. */
+  resetAt?: string;
+  /** User-facing reason when the reservation is denied or cannot be confirmed. */
+  reason?: string;
+}
+
 /** Returns true if the given balance meets the minimum required to proceed. */
 export function hasMinimumBalance(
   balance: number | null | undefined,

@@ -17,6 +17,7 @@
 // `Adapter` type is the root interface implemented by the service binding.
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
+import type { AiRequestOutcome, AiRequestReservationResult } from "./limits";
 
 /**
  * A pagination cursor.
@@ -955,6 +956,18 @@ export interface ApprovalQueue extends ObservationAuthorizer {
    *   does not complete, any SQL writes performed just before submit() are rolled back...
    */
   submitAction(action: number, description: ActionDescription): Promise<void>;
+
+  /**
+   * Atomically reserve one platform-funded AI request before contacting a model provider. The
+   * caller supplies an id so a lost RPC response can be retried idempotently.
+   */
+  reserveAiRequest(reservationId: string): Promise<AiRequestReservationResult>;
+
+  /**
+   * Record the outcome of a previously reserved AI request. Outcomes remain counted even when the
+   * provider result is unknown; settlement is idempotent.
+   */
+  settleAiRequest(reservationId: string, outcome: AiRequestOutcome): Promise<void>;
 
   /**
    * Notifies the overseer that the gadget (or an agent) has requested to register a persistent

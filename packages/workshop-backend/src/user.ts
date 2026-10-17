@@ -7,7 +7,16 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig } from "./ai-gateway.js";
-import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
+import {
+  utcDayKey,
+  nextUtcMidnightIso,
+  getDailyLlmCallLimit,
+  DailyQuotaResult,
+} from "./ai-gateway-billing/limits/config.js";
+import type {
+  AiRequestOutcome,
+  AiRequestReservationResult,
+} from "@gadgets/workshop-shared/limits";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
@@ -144,6 +153,26 @@ type CloudflareBilling = {
   creditsUpdatedAt?: number;
 };
 
+type AiRequestReservationRecord = {
+  id: string;
+  day: string;
+  status: "reserved" | "settled" | "denied";
+  outcome?: AiRequestOutcome;
+  createdAt: number;
+  settledAt?: number;
+};
+
+// Reservation rows are an audit/idempotency aid, not the source of the quota count. Keep terminal
+// rows briefly for retry-safe settlement and retain in-flight rows longer so a result-unknown call
+// can be settled after a transient RPC failure without allowing storage to grow without bound.
+const AI_RESERVATION_TERMINAL_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
+const AI_RESERVATION_IN_FLIGHT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_AI_RESERVATION_RECORDS = 256;
+const AI_REQUEST_OUTCOMES: ReadonlySet<string> = new Set([
+  "success", "budget-denied", "rate-limit", "provider", "result-unknown", "input-invalid",
+  "aborted",
+]);
+
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length != b.length) {
     return false;
@@ -188,6 +217,12 @@ function makeUserStorage(storage: DurableObjectStorage) {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
       }),
+      // One row per platform-funded model request. The dailyLlmCount singleton remains the quota
+      // source of truth; this collection supplies idempotent reserve/settle semantics and bounded
+      // evidence for failures whose provider result is uncertain.
+      aiReservations: collection<AiRequestReservationRecord>()({
+        primaryKey: "id",
+      }),
     },
     singletons: {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
@@ -230,6 +265,42 @@ function makeUserStorage(storage: DurableObjectStorage) {
 }
 
 type UserStorage = ReturnType<typeof makeUserStorage>;
+
+function pruneAiReservations(
+    reservations: Pick<UserStorage["aiReservations"], "list" | "delete">,
+    now: number): void {
+  let records = Array.from(reservations.list());
+  for (let record of records) {
+    let age = now - (record.status === "settled" ? (record.settledAt ?? record.createdAt)
+                                                   : record.createdAt);
+    let retention = record.status === "reserved"
+        ? AI_RESERVATION_IN_FLIGHT_RETENTION_MS
+        : AI_RESERVATION_TERMINAL_RETENTION_MS;
+    if (age > retention) {
+      reservations.delete(record.id);
+    }
+  }
+
+  records = Array.from(reservations.list());
+  if (records.length <= MAX_AI_RESERVATION_RECORDS) return;
+
+  // Prefer removing terminal evidence first. If a misconfigured very large limit still leaves
+  // more than the bound in-flight, remove the oldest in-flight rows only after all terminal rows.
+  records.sort((a, b) => {
+    let aInFlight = a.status === "reserved" ? 1 : 0;
+    let bInFlight = b.status === "reserved" ? 1 : 0;
+    return aInFlight - bInFlight || a.createdAt - b.createdAt;
+  });
+  for (let record of records.slice(0, records.length - MAX_AI_RESERVATION_RECORDS)) {
+    reservations.delete(record.id);
+  }
+}
+
+function dailyLlmUsed(
+    dailyLlmCount: Pick<UserStorage["dailyLlmCount"], "get">, day: string): number {
+  let record = dailyLlmCount.get();
+  return record && record.day === day ? record.count : 0;
+}
 
 function unavailableGatekeeperVendorInfo(id: string): GatekeeperVendorInfo {
   return {
@@ -696,15 +767,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // race-free; the window resets at UTC midnight when the stored day no longer matches.
   // ---------------------------------------------------------------------------------------------
 
-  #dailyUsed(day: string): number {
-    let record = this.storage.dailyLlmCount.get();
-    return record && record.day === day ? record.count : 0;
-  }
-
   /** Read the current daily quota state without counting a call. */
   async checkDailyLlmCount(limit: number): Promise<DailyQuotaResult> {
     let day = utcDayKey();
-    let used = this.#dailyUsed(day);
+    let used = dailyLlmUsed(this.storage.dailyLlmCount, day);
     return { withinLimits: used < limit, remaining: Math.max(0, limit - used), limit, used,
              resetAt: nextUtcMidnightIso() };
   }
@@ -716,7 +782,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async consumeDailyLlmCall(limit: number): Promise<DailyQuotaResult> {
     let day = utcDayKey();
-    let used = this.#dailyUsed(day);
+    let used = dailyLlmUsed(this.storage.dailyLlmCount, day);
     if (used >= limit) {
       return { withinLimits: false, remaining: 0, limit, used, resetAt: nextUtcMidnightIso() };
     }
@@ -724,6 +790,103 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.dailyLlmCount.put({ day, count: newUsed });
     return { withinLimits: true, remaining: Math.max(0, limit - newUsed), limit, used: newUsed,
              resetAt: nextUtcMidnightIso() };
+  }
+
+  /**
+   * Atomically reserve one platform-funded AI request before its provider call starts.
+   *
+   * `reservationId` is supplied by the caller and makes a lost RPC response retry-safe: repeating
+   * the same id returns the existing reservation instead of consuming another daily slot. A
+   * denied request never increments the daily counter.
+   */
+  async reserveAiRequest(reservationId: string): Promise<AiRequestReservationResult> {
+    if (typeof reservationId !== "string" || reservationId.length === 0 ||
+        reservationId.length > 128) {
+      throw new TypeError(
+          "AI request reservation id must be a non-empty string of at most 128 characters.");
+    }
+
+    let now = Date.now();
+    pruneAiReservations(this.storage.aiReservations, now);
+    let day = utcDayKey(new Date(now));
+    let existing = this.storage.aiReservations.get(reservationId);
+    let used = dailyLlmUsed(this.storage.dailyLlmCount, day);
+    let limit = getDailyLlmCallLimit(this.env);
+    let resetAt = nextUtcMidnightIso(new Date(now));
+
+    if (existing?.day === day) {
+      if (existing.status === "reserved") {
+        return {
+          allowed: true,
+          reservationId,
+          remaining: Math.max(0, limit - used),
+          resetAt,
+        };
+      }
+      if (existing.status === "denied") {
+        return {
+          allowed: false,
+          reservationId,
+          remaining: Math.max(0, limit - used),
+          resetAt,
+          reason: "This AI request was already denied by the daily usage limit.",
+        };
+      }
+      return {
+        allowed: false,
+        reservationId,
+        remaining: Math.max(0, limit - used),
+        resetAt,
+        reason: "This AI request reservation has already been settled.",
+      };
+    }
+
+    if (used >= limit) {
+      this.storage.aiReservations.put({
+        id: reservationId,
+        day,
+        status: "denied",
+        createdAt: now,
+      });
+      return {
+        allowed: false,
+        reservationId,
+        remaining: 0,
+        resetAt,
+        reason: "Free usage limit reached. Connect your Cloudflare account or use your own API keys to continue.",
+      };
+    }
+
+    let newUsed = used + 1;
+    this.storage.dailyLlmCount.put({day, count: newUsed});
+    this.storage.aiReservations.put({
+      id: reservationId,
+      day,
+      status: "reserved",
+      createdAt: now,
+    });
+    return {
+      allowed: true,
+      reservationId,
+      remaining: Math.max(0, limit - newUsed),
+      resetAt,
+    };
+  }
+
+  /**
+   * Settle a previously reserved AI request. Settlement is idempotent; failed or unknown provider
+   * outcomes remain counted in the daily quota and are never released back to the caller.
+   */
+  async settleAiRequest(reservationId: string, outcome: AiRequestOutcome): Promise<void> {
+    if (!AI_REQUEST_OUTCOMES.has(outcome)) {
+      throw new TypeError("Unknown AI request outcome.");
+    }
+    let record = this.storage.aiReservations.get(reservationId);
+    if (!record || record.status === "denied" || record.status === "settled") return;
+    record.status = "settled";
+    record.outcome = outcome;
+    record.settledAt = Date.now();
+    this.storage.aiReservations.put(record);
   }
 
   /** DO NOT MAKE PUBLIC -- returns API keys. */
